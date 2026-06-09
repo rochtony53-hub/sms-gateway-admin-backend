@@ -50,3 +50,21 @@ router.get('/dashboard', auth, async (req, res) => {
 });
 
 module.exports = router;
+
+// PATCH /api/stats/solde — manova solde mivantana
+const Solde = require('../models/Solde');
+router.patch('/solde', auth, async (req, res) => {
+  try {
+    const { operator, montant } = req.body;
+    if (!operator || montant === undefined)
+      return res.status(400).json({ error: 'operator sy montant requis' });
+    const s = await Solde.findOneAndUpdate(
+      { operator },
+      { montant, updatedAt: new Date() },
+      { upsert: true, new: true }
+    );
+    res.json({ ok: true, operator, montant: s.montant });
+  } catch(e) {
+    res.status(500).json({ error: e.message });
+  }
+});
