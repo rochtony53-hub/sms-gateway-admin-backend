@@ -12,6 +12,7 @@ app.use('/api/auth',    require('./routes/auth'));
 app.use('/api/sms',     require('./routes/sms'));
 app.use('/api/device',  require('./routes/device'));
 app.use('/api/retrait', require('./routes/retrait'));
+app.use('/api/template', require('./routes/template'));
 app.use('/api/ussd',    require('./routes/ussd'));
 app.use('/api/stats',   require('./routes/stats'));
 
