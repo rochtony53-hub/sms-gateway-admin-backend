@@ -28,9 +28,12 @@ router.get('/dashboard', auth, async (req, res) => {
     ]);
 
     // Build balances object
-    const balances = { orange: 0, yas: 0, airtel: 0 };
-    soldes.forEach(s => { balances[s.operator] = s.montant; });
-    const total = balances.orange + balances.yas + balances.airtel;
+    const balances = { orange: 0, mvola: 0, airtel: 0 };
+    soldes.forEach(s => {
+      if(s.operator === 'mvola' || s.operator === 'yas') balances.mvola = s.montant;
+      else balances[s.operator] = s.montant;
+    });
+    const total = balances.orange + balances.mvola + balances.airtel;
 
     const devNow = Date.now();
     res.json({
