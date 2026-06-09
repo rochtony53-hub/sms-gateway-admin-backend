@@ -50,7 +50,6 @@ router.get('/dashboard', auth, async (req, res) => {
 });
 
 // PATCH /api/stats/solde — manova solde mivantana
-const Solde = require('../models/Solde');
 router.patch('/solde', auth, async (req, res) => {
   try {
     const { operator, montant } = req.body;
