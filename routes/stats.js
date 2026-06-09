@@ -49,8 +49,6 @@ router.get('/dashboard', auth, async (req, res) => {
   }
 });
 
-module.exports = router;
-
 // PATCH /api/stats/solde — manova solde mivantana
 const Solde = require('../models/Solde');
 router.patch('/solde', auth, async (req, res) => {
@@ -68,3 +66,5 @@ router.patch('/solde', auth, async (req, res) => {
     res.status(500).json({ error: e.message });
   }
 });
+
+module.exports = router;
