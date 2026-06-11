@@ -50,4 +50,15 @@ router.get('/stats', flexAuth, async (req, res) => {
   }
 });
 
+// DELETE /api/device/:id — supprimer un device
+router.delete('/:id', auth, async (req, res) => {
+  try {
+    const deleted = await Device.findByIdAndDelete(req.params.id);
+    if (!deleted) return res.status(404).json({ error: 'Device introuvable' });
+    res.json({ ok: true, deleted: deleted.deviceId });
+  } catch(e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 module.exports = router;
