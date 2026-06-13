@@ -18,7 +18,7 @@ app.use('/api/stats',   require('./routes/stats'));
 app.use('/api/service', require('./routes/service'));
 app.use('/api/settings', require('./routes/settings'));
 
-app.get('/health', (req, res) => res.json({ status: 'ok', version: '1.0.0' }));
+app.get('/health', (req, res) => res.json({ status: 'ok', version: '1.1.0' }));
 
 mongoose.connect(process.env.MONGO_URI)
   .then(() => {
