@@ -1,21 +1,44 @@
-const router = require('express').Router();
-const auth   = require('../middleware/auth');
+const router   = require('express').Router();
+const auth     = require('../middleware/auth');
+const Settings = require('../models/Settings');
 
-// State options in memory (persist avec MongoDB si besoin plus tard)
-let options = { tpe: true, tpe_ret: true, cash: false, ret_aut: true, ussd: true };
+const DEFAULTS = { tpe: true, tpe_ret: true, cash: false, ret_aut: true, ussd: true };
+const ALLOWED  = ['tpe','tpe_ret','cash','ret_aut','ussd'];
 
-// GET — récupère les options
+// Options in-memory cache
+let options = { ...DEFAULTS };
+
+// Initialise depuis MongoDB au démarrage
+async function loadOptions() {
+  try {
+    const docs = await Settings.find({ key: { $in: ALLOWED } });
+    docs.forEach(d => { options[d.key] = d.value; });
+  } catch(e) { console.error('loadOptions:', e.message); }
+}
+loadOptions();
+
+// GET
 router.get('/options', auth, (req, res) => {
   res.json(options);
 });
 
-// POST — met à jour les options
-router.post('/options', auth, (req, res) => {
-  const allowed = ['tpe','tpe_ret','cash','ret_aut','ussd'];
-  for (const key of allowed) {
-    if (req.body[key] !== undefined) options[key] = !!req.body[key];
+// POST
+router.post('/options', auth, async (req, res) => {
+  try {
+    for (const key of ALLOWED) {
+      if (req.body[key] !== undefined) {
+        options[key] = !!req.body[key];
+        await Settings.findOneAndUpdate(
+          { key },
+          { value: options[key] },
+          { upsert: true }
+        );
+      }
+    }
+    res.json({ ok: true, options });
+  } catch(e) {
+    res.status(500).json({ error: e.message });
   }
-  res.json({ ok: true, options });
 });
 
 module.exports = router;
