@@ -117,4 +117,20 @@ router.get('/', auth, async (req, res) => {
   }
 });
 
+// DELETE /api/sms/clear — vider tout
+router.delete('/clear', auth, async (req, res) => {
+  try {
+    await Sms.deleteMany({});
+    res.json({ ok: true });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// DELETE /api/sms/:id — supprimer un SMS
+router.delete('/:id', auth, async (req, res) => {
+  try {
+    await Sms.findByIdAndDelete(req.params.id);
+    res.json({ ok: true });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
 module.exports = router;

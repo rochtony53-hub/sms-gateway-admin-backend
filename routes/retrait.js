@@ -163,4 +163,20 @@ router.get('/', auth, async (req, res) => {
   }
 });
 
+// DELETE /api/retrait/clear — vider tout
+router.delete('/clear', auth, async (req, res) => {
+  try {
+    await Retrait.deleteMany({});
+    res.json({ ok: true });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// DELETE /api/retrait/:id — supprimer un retrait
+router.delete('/:id', auth, async (req, res) => {
+  try {
+    await Retrait.findByIdAndDelete(req.params.id);
+    res.json({ ok: true });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
 module.exports = router;
