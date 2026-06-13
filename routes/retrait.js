@@ -66,7 +66,7 @@ router.post('/', auth, async (req, res) => {
 
     // Check options terminal
     if (!opts.ret_aut)
-      return res.status(403).json({ error: 'Retrait désactivé par l'administrateur' });
+      return res.status(403).json({ error: 'Retrait desactive par administrateur' });
     if (!opts.ussd)
       return res.status(403).json({ error: 'USSD désactivé par l'administrateur' });
 
