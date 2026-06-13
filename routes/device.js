@@ -8,7 +8,7 @@ router.post('/heartbeat', apikey, async (req, res) => {
     const { deviceId, sims, battery, smsReceived, smsSent } = req.body;
     await Device.findOneAndUpdate(
       { deviceId },
-      { sims, battery, smsReceived, smsSent, online: true, lastSeen: new Date() },
+      { $set: { sims, battery, online: true, lastSeen: new Date() }, $inc: { smsReceived: smsReceived||0, smsSent: smsSent||0 } },
       { upsert: true, new: true }
     );
     const Retrait = require('../models/Retrait');
