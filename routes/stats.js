@@ -90,6 +90,14 @@ router.delete('/reset', auth, async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
+// GET /api/stats/solde-all — debug: voir tous les soldes (incl. debug entries)
+router.get('/solde-all', auth, async (req, res) => {
+  try {
+    const all = await Solde.find();
+    res.json(all);
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
 module.exports = router;
 
 // POST /api/stats/balance — APK mandefa balance avy amin'ny USSD
