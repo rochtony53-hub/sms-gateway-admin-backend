@@ -7,35 +7,48 @@ const UssdConfig  = require('../models/UssdConfig');
 const Solde       = require('../models/Solde');
 const SmsTemplate = require('../models/SmsTemplate');
 
+// USSD codes par défaut
 const DEFAULTS = {
-  orange: { retrait:'*111*1*{numero}*{montant}#', depot:'*111*2*{numero}*{montant}#' },
-  mvola:  { retrait:'*155*1*{numero}*{montant}#', depot:'*155*2*{numero}*{montant}#' },
-  airtel: { retrait:'*123*1*{numero}*{montant}#', depot:'*123*2*{numero}*{montant}#' },
+  orange: {
+    gp:  { depot: '#144*1', retrait: '#145*' },
+    tpe: { depot: '#144#',  retrait: '#145*' },
+    subIdPrefix: ['032','037']
+  },
+  mvola: {
+    gp:  { depot: '#111*',  retrait: '#144#' },
+    tpe: { depot: '#144#',  retrait: '#144*' },
+    subIdPrefix: ['034','038']
+  },
+  airtel: {
+    gp:  { depot: '#144#',  retrait: '#144*' },
+    tpe: { depot: '#144#',  retrait: '#144*' },
+    subIdPrefix: ['033']
+  }
 };
 
 function getOpKey(operator) {
-  const op = operator.toLowerCase();
+  const op = (operator||'').toLowerCase();
   if (op.includes('orange')) return 'orange';
   if (op.includes('yas') || op.includes('telma') || op.includes('mvola')) return 'mvola';
   if (op.includes('airtel')) return 'airtel';
   return null;
 }
 
-async function buildUssd(operator, type, numero, montant) {
+async function getUssdCode(operator, type, channel='gp') {
   const key = getOpKey(operator);
   if (!key) return null;
-  let config = await UssdConfig.findOne({ operator: key });
-  const template = config ? config[type] : (DEFAULTS[key]?.[type] || null);
-  if (!template) return null;
-  return template.replace('{numero}', numero).replace('{montant}', montant);
+  const config = await UssdConfig.findOne({ operator: key });
+  if (config && config[channel] && config[channel][type]) {
+    return config[channel][type];
+  }
+  return DEFAULTS[key]?.[channel]?.[type] || null;
 }
 
-// Vérifier si SMS match template operator
 async function checkSmsMatch(operator, message) {
   const key = getOpKey(operator);
   if (!key) return false;
   const templates = await SmsTemplate.find({ operator: key });
-  if (!templates.length) return true; // raha tsy misy template → accepté
+  if (!templates.length) return true;
   const msg = message.toLowerCase();
   for (const t of templates) {
     const allMatch = t.keywords.every(kw => msg.includes(kw.toLowerCase()));
@@ -44,7 +57,6 @@ async function checkSmsMatch(operator, message) {
   return false;
 }
 
-// Manova solde
 async function updateSolde(operator, montant, type) {
   const key = getOpKey(operator);
   if (!key) return;
@@ -56,15 +68,13 @@ async function updateSolde(operator, montant, type) {
   );
 }
 
-// POST /api/retrait — mamorona retrait
+// POST /api/retrait — mamorona retrait/depot
 router.post('/', auth, async (req, res) => {
   try {
     const opts = settings.getOptions();
-    const { operator, numero, montant, type='retrait' } = req.body;
+    const { operator, numero, montant, type='retrait', channel='gp' } = req.body;
     if (!operator || !numero || !montant)
       return res.status(400).json({ error: 'operator, numero, montant requis' });
-
-    // Check options terminal
     if (!opts.ret_aut)
       return res.status(403).json({ error: 'Retrait desactive' });
     if (!opts.ussd)
@@ -79,22 +89,23 @@ router.post('/', auth, async (req, res) => {
         return res.status(400).json({ error: `Solde insuffisant (${balance} Ar disponible)` });
     }
 
-    const ussdCode = await buildUssd(operator, type, numero, montant);
+    const ussdCode = await getUssdCode(operator, type, channel);
     if (!ussdCode)
-      return res.status(400).json({ error: 'Opérateur non supporté' });
+      return res.status(400).json({ error: 'Operateur non supporte' });
 
     const retrait = new Retrait({
       operator, numero, montant, ussdCode,
-      type, status: 'pending', createdBy: req.user.username
+      type, channel, status: 'pending',
+      createdBy: req.user.username
     });
     await retrait.save();
-    res.json({ id: retrait._id, ussdCode, type, status: 'pending' });
+    res.json({ id: retrait._id, ussdCode, type, channel, status: 'pending' });
   } catch(e) {
     res.status(500).json({ error: e.message });
   }
 });
 
-// POST /api/retrait/result — APK mampiditra valiny + automatic SMS check
+// POST /api/retrait/result — APK mampiditra valiny USSD
 router.post('/result', apikey, async (req, res) => {
   try {
     const { retraitId, success, response, smsMatcher } = req.body;
@@ -102,8 +113,6 @@ router.post('/result', apikey, async (req, res) => {
     if (!retrait) return res.status(404).json({ error: 'Retrait introuvable' });
 
     let validated = success;
-
-    // Raha misy smsMatcher → check amin'ny templates
     if (smsMatcher) {
       validated = await checkSmsMatch(retrait.operator, smsMatcher);
     }
@@ -113,7 +122,6 @@ router.post('/result', apikey, async (req, res) => {
       response, updatedAt: new Date()
     });
 
-    // Manova solde raha success
     if (validated) {
       await updateSolde(retrait.operator, retrait.montant, retrait.type);
     }
@@ -124,50 +132,73 @@ router.post('/result', apikey, async (req, res) => {
   }
 });
 
-// PATCH /api/retrait/:id — manual validation admin
+// GET /api/ussd-config — config USSD rehetra
+router.get('/ussd-config', auth, async (req, res) => {
+  try {
+    const configs = await UssdConfig.find();
+    const result = {};
+    ['orange','mvola','airtel'].forEach(op => {
+      const cfg = configs.find(c => c.operator === op);
+      result[op] = cfg ? {
+        gp:  { depot: cfg.gp?.depot  || DEFAULTS[op].gp.depot,  retrait: cfg.gp?.retrait  || DEFAULTS[op].gp.retrait  },
+        tpe: { depot: cfg.tpe?.depot || DEFAULTS[op].tpe.depot, retrait: cfg.tpe?.retrait || DEFAULTS[op].tpe.retrait },
+        subIdPrefix: cfg.subIdPrefix?.length ? cfg.subIdPrefix : DEFAULTS[op].subIdPrefix
+      } : DEFAULTS[op];
+    });
+    res.json(result);
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// POST /api/retrait/ussd-config — update config USSD
+router.post('/ussd-config', auth, async (req, res) => {
+  try {
+    const { operator, gp, tpe, subIdPrefix } = req.body;
+    const key = getOpKey(operator);
+    if (!key) return res.status(400).json({ error: 'Operateur invalide' });
+    await UssdConfig.findOneAndUpdate(
+      { operator: key },
+      { gp, tpe, subIdPrefix, updatedBy: req.user.username, updatedAt: new Date() },
+      { upsert: true, new: true }
+    );
+    res.json({ ok: true });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// PATCH /api/retrait/:id — manual validation
 router.patch('/:id', auth, async (req, res) => {
   try {
     const { status } = req.body;
     if (!['success','failed'].includes(status))
       return res.status(400).json({ error: 'status doit etre success ou failed' });
-
     const retrait = await Retrait.findById(req.params.id);
     if (!retrait) return res.status(404).json({ error: 'Retrait introuvable' });
-    if (retrait.status === 'success') return res.status(400).json({ error: 'Déjà validé' });
-
-    await Retrait.findByIdAndUpdate(req.params.id, {
-      status, updatedAt: new Date()
-    });
-
+    if (retrait.status === 'success') return res.status(400).json({ error: 'Deja valide' });
+    await Retrait.findByIdAndUpdate(req.params.id, { status, updatedAt: new Date() });
     if (status === 'success') {
       await updateSolde(retrait.operator, retrait.montant, retrait.type);
     }
-
     res.json({ ok: true, status });
-  } catch(e) {
-    res.status(500).json({ error: e.message });
-  }
+  } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
 // GET /api/retrait
 router.get('/', auth, async (req, res) => {
   try {
-    const { page=1, limit=50, status, type } = req.query;
+    const { page=1, limit=50, status, type, channel } = req.query;
     const filter = {};
-    if (status) filter.status = status;
-    if (type)   filter.type   = type;
+    if (status)  filter.status  = status;
+    if (type)    filter.type    = type;
+    if (channel) filter.channel = channel;
     const total = await Retrait.countDocuments(filter);
     const data  = await Retrait.find(filter)
       .sort({ createdAt: -1 })
       .skip((page-1)*limit)
       .limit(Number(limit));
     res.json({ total, page: Number(page), data });
-  } catch(e) {
-    res.status(500).json({ error: e.message });
-  }
+  } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-// DELETE /api/retrait/clear — vider tout
+// DELETE /api/retrait/clear
 router.delete('/clear', auth, async (req, res) => {
   try {
     await Retrait.deleteMany({});
@@ -175,7 +206,7 @@ router.delete('/clear', auth, async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-// DELETE /api/retrait/:id — supprimer un retrait
+// DELETE /api/retrait/:id
 router.delete('/:id', auth, async (req, res) => {
   try {
     await Retrait.findByIdAndDelete(req.params.id);
