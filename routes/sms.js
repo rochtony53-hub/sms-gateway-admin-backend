@@ -49,17 +49,17 @@ function parseSolde(opKey, message) {
   return (montant !== null && !isNaN(montant)) ? montant : null;
 }
 
-async function autoValidate(operator, message) {
+async function autoValidate(operator, message, smsId) {
   const opts = settings.getOptions();
   if (!opts.ret_aut) return;
   const opKey = getOpKey(operator);
   if (!opKey) return;
 
   const matchType = await checkTemplate(opKey, message);
-  if (matchType === null) return; // tsy misy template
+  if (matchType === null) { if(smsId) await Sms.findByIdAndUpdate(smsId,{status:"ignored"}); return; }
   
   // Tsy mitovy → refusé ny retrait pending tranainy indrindra fotsiny
-  if (matchType === false) {
+  if (matchType === false) { if(smsId) await Sms.findByIdAndUpdate(smsId,{status:"ignored"});
     const oldest = await Retrait.find({
       operator: { $regex: new RegExp(opKey, 'i') }, status: 'pending'
     }).sort({ createdAt: 1 }).limit(1);
@@ -76,7 +76,7 @@ async function autoValidate(operator, message) {
     type: matchType
   }).sort({ createdAt: 1 }).limit(1);
 
-  if (!pending.length) return;
+  if (!pending.length) { if(smsId) await Sms.findByIdAndUpdate(smsId,{status:'matched'}); return; }
   const retrait = pending[0];
 
   // Check solde raha retrait
@@ -85,6 +85,7 @@ async function autoValidate(operator, message) {
     const balance = solde?.montant || 0;
     if (balance < retrait.montant) {
       await Retrait.findByIdAndUpdate(retrait._id, { status: 'failed', updatedAt: new Date() });
+      if(smsId) await Sms.findByIdAndUpdate(smsId,{status:'pending'});
       return;
     }
     await Solde.findOneAndUpdate({ operator: opKey }, { $inc: { montant: -retrait.montant }, updatedAt: new Date() });
@@ -92,7 +93,7 @@ async function autoValidate(operator, message) {
     await Solde.findOneAndUpdate({ operator: opKey }, { $inc: { montant: retrait.montant }, updatedAt: new Date() }, { upsert: true });
   }
 
-  await Retrait.findByIdAndUpdate(retrait._id, { status: 'success', updatedAt: new Date() });
+  await Retrait.findByIdAndUpdate(retrait._id, { status: "success", updatedAt: new Date() }); if(smsId) await Sms.findByIdAndUpdate(smsId,{status:"matched"});
 }
 
 // Reçoit SMS depuis APK Android
@@ -116,7 +117,7 @@ router.post('/receive', apikey, async (req, res) => {
       { upsert: true }
     );
     // Auto-validate retrait/depot selon SMS template
-    autoValidate(operator, message).catch(e => console.error('autoValidate:', e));
+    autoValidate(operator, message, sms._id).catch(e => console.error('autoValidate:', e));
     // Parse sy update solde avy amin'ny SMS
     const opKey2 = getOpKey(operator);
     if (opKey2) {
