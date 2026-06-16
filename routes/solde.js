@@ -13,18 +13,34 @@ function getOpKey(operator) {
 
 // Extrait le montant depuis le texte brut de la réponse USSD
 // Ex: "Votre solde est de 49 500,00 Ar" -> 49500
+// Ex: "Solde: 1.250.000 Ar" -> 1250000
 function extractAmount(text) {
   if (!text) return null;
-  const cleaned = text.replace(/\s/g, '');
-  const matches = cleaned.match(/(\d{1,3}(?:[.,]\d{3})*(?:[.,]\d{1,2})?)/g);
+
+  // Cherche un nombre avec espaces ou points comme séparateurs de milliers,
+  // suivi optionnellement d'une partie décimale après virgule ou point
+  // Pattern: groupes de 1-3 chiffres séparés par espace/point, puis decimal optionnel
+  const pattern = /\d{1,3}(?:[\s.]\d{3})*(?:,\d{1,2})?/g;
+  const matches = text.match(pattern);
   if (!matches || !matches.length) return null;
-  // Prendre le plus grand nombre trouvé (généralement le solde)
-  const amounts = matches.map(m => {
-    let n = m.replace(/[.,](?=\d{3}(\D|$))/g, ''); // retire séparateurs milliers
-    n = n.replace(',', '.'); // virgule décimale -> point
-    return parseFloat(n);
-  }).filter(n => !isNaN(n));
+
+  const amounts = matches.map(raw => {
+    let s = raw.trim();
+    // Sépare partie décimale (après virgule) de la partie entière
+    let decimalPart = '';
+    const commaIdx = s.indexOf(',');
+    if (commaIdx >= 0) {
+      decimalPart = s.substring(commaIdx + 1);
+      s = s.substring(0, commaIdx);
+    }
+    // Retire tous les séparateurs de milliers (espace ou point)
+    const intPart = s.replace(/[\s.]/g, '');
+    const num = parseFloat(intPart + (decimalPart ? '.' + decimalPart : ''));
+    return isNaN(num) ? null : num;
+  }).filter(n => n !== null);
+
   if (!amounts.length) return null;
+  // Le solde est généralement le plus grand nombre trouvé dans le message
   return Math.round(Math.max(...amounts));
 }
 
@@ -40,7 +56,7 @@ router.post('/check-result', apikey, async (req, res) => {
 
     const amount = extractAmount(ussdResponse);
     if (amount === null)
-      return res.status(400).json({ error: 'Impossible d\'extraire le montant', raw: ussdResponse });
+      return res.status(400).json({ error: "Impossible d'extraire le montant", raw: ussdResponse });
 
     const baseTimestamp = timestamp ? new Date(timestamp) : new Date();
 
@@ -62,7 +78,7 @@ router.post('/check-result', apikey, async (req, res) => {
   }
 });
 
-// GET /api/solde — liste des soldes avec infos base
+// GET /api/solde — liste des soldes avec infos base (pour badge Vérifié/Estimé)
 router.get('/', auth, async (req, res) => {
   try {
     const soldes = await Solde.find();
