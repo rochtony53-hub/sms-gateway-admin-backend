@@ -61,13 +61,33 @@ router.post('/', auth, async (req, res) => {
     const opts     = require('./settings').getOptions();
     const channel  = (type==='depot' ? opts.tpe_depot : opts.tpe_ret) ? 'TPE' : 'Grand Public';
 
+    const opKey = getOpKey(operator) || operator;
+    const montantNum = Number(montant);
+
+    // Validation: mihazo montant (solde tena izy) FOANA na ON na OFF
+    if (type === 'retrait') {
+      const solde = await Solde.findOne({ operator: opKey });
+      const soldeTenaIzy = solde ? (solde.montant || 0) : 0;
+      if (soldeTenaIzy < montantNum) {
+        return res.status(400).json({ error: 'Solde insuffisant', solde: soldeTenaIzy, demande: montantNum });
+      }
+    }
+
     const retrait = new Retrait({
-      operator: getOpKey(operator)||operator,
-      numero, montant: Number(montant),
+      operator: opKey,
+      numero, montant: montantNum,
       type, ussdCode, channel,
       status: 'pending'
     });
     await retrait.save();
+
+    // Update montant (solde tena izy) + montantOff (display raha toggle OFF)
+    const delta = type === 'depot' ? montantNum : -montantNum;
+    await Solde.findOneAndUpdate(
+      { operator: opKey },
+      { $inc: { montant: delta, montantOff: delta }, updatedAt: new Date() },
+      { upsert: true }
+    );
 
     res.json({ ok: true, ussdCode, channel, id: retrait._id });
   } catch(e) { res.status(500).json({ error: e.message }); }
