@@ -9,7 +9,9 @@ const deviceSchema = new mongoose.Schema({
   smsSent:     { type: Number, default: 0 },
   online:      { type: Boolean, default: false },
   ussdCheckEnabled: { type: Boolean, default: false },
-  lastSeen:    { type: Date, default: Date.now }
+  lastSeen:    { type: Date, default: Date.now },
+  networkType:  { type: String, default: '' },
+  signalLevel:  { type: Number, default: 0 }
 });
 
 module.exports = mongoose.model('Device', deviceSchema);

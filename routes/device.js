@@ -5,9 +5,11 @@ const Device = require('../models/Device');
 
 router.post('/heartbeat', apikey, async (req, res) => {
   try {
-    const { deviceId, sims, battery, smsReceived, smsSent, ussdCheckEnabled } = req.body;
+    const { deviceId, sims, battery, smsReceived, smsSent, ussdCheckEnabled, networkType, signalLevel } = req.body;
     const setFields = { sims, battery, online: true, lastSeen: new Date() };
     if (ussdCheckEnabled !== undefined) setFields.ussdCheckEnabled = ussdCheckEnabled;
+    if (networkType !== undefined) setFields.networkType = networkType;
+    if (signalLevel !== undefined) setFields.signalLevel = signalLevel;
     await Device.findOneAndUpdate(
       { deviceId },
       { $set: setFields, $inc: { smsReceived: smsReceived||0, smsSent: smsSent||0 } },
