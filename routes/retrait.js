@@ -122,4 +122,13 @@ router.patch('/:id/status', auth, async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
+
+router.get('/:id', auth, async (req, res) => {
+  try {
+    const r = await Retrait.findById(req.params.id);
+    if (!r) return res.status(404).json({ error: 'Commande non trouvee' });
+    res.json(r);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 module.exports = router;
