@@ -6,7 +6,7 @@ const retraitSchema = new mongoose.Schema({
   montant:   { type: Number, required: true },
   status:    { type: String, enum: ['pending','processing','success','failed'], default: 'pending' },
   type:      { type: String, enum: ['retrait','depot'], default: 'retrait' },
-  channel:   { type: String, enum: ['gp','tpe'], default: 'gp' },
+  channel:   { type: String, enum: ['gp','tpe','TPE','Grand Public'], default: 'gp' },
   ussdCode:  { type: String },
   response:  { type: String },
   createdBy: { type: String },
