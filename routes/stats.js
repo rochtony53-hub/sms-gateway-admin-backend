@@ -92,7 +92,7 @@ router.delete('/reset', auth, async (req, res) => {
   try {
     await require('../models/Sms').deleteMany({});
     await require('../models/Retrait').deleteMany({});
-    await require('../models/Solde').updateMany({}, { montant: 0 });
+    await require('../models/Solde').updateMany({}, { montant: 0, montantOff: 0, baseAmount: 0, baseTimestamp: null });
     res.json({ ok: true });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
