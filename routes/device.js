@@ -2,6 +2,7 @@ const router = require('express').Router();
 const apikey = require('../middleware/apikey');
 const auth   = require('../middleware/auth');
 const Device = require('../models/Device');
+const Sms = require('../models/Sms');
 
 router.post('/heartbeat', apikey, async (req, res) => {
   try {
@@ -43,9 +44,16 @@ router.get('/stats', flexAuth, async (req, res) => {
     const filter = deviceId ? { deviceId } : {};
     const devices = await Device.find(filter).sort({ lastSeen: -1 });
     const now = Date.now();
-    const result = devices.map(d => ({
-      ...d.toObject(),
-      online: (now - new Date(d.lastSeen).getTime()) < 120000
+    const result = await Promise.all(devices.map(async d => {
+      const obj = d.toObject();
+      try {
+        obj.smsReceived = await Sms.countDocuments({ deviceId: d.deviceId });
+        obj.smsSent     = await Sms.countDocuments({ deviceId: d.deviceId, status: { $in: ['sent','matched'] } });
+      } catch(e){}
+      return {
+        ...obj,
+        online: (now - new Date(d.lastSeen).getTime()) < 120000
+      };
     }));
     if (deviceId && result.length === 1) return res.json(result[0]);
     res.json(result);
