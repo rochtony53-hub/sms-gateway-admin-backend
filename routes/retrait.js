@@ -91,14 +91,6 @@ router.post('/', auth, async (req, res) => {
     });
     await retrait.save();
 
-    // Update montant (solde tena izy) + montantOff (display raha toggle OFF)
-    const delta = type === 'depot' ? montantNum : -montantNum;
-    await Solde.findOneAndUpdate(
-      { operator: opKey },
-      { $inc: { montant: delta, montantOff: delta }, updatedAt: new Date() },
-      { upsert: true }
-    );
-
     res.json({ ok: true, ussdCode, channel, id: retrait._id, sessionId });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
@@ -122,6 +114,19 @@ router.get('/', auth, async (req, res) => {
 router.patch('/:id/status', auth, async (req, res) => {
   try {
     const { status } = req.body;
+    // Ampiharo ny solde rehefa VALIDÉ (success) ihany — indray mandeha
+    if (status === 'success') {
+      const cur = await Retrait.findById(req.params.id);
+      if (cur && cur.status !== 'success') {
+        const opKey = (cur.operator||'').toLowerCase();
+        const delta = cur.type === 'depot' ? cur.montant : -cur.montant;
+        await Solde.findOneAndUpdate(
+          { operator: opKey },
+          { $inc: { montant: delta, montantOff: delta }, updatedAt: new Date() },
+          { upsert: true }
+        );
+      }
+    }
     const r = await Retrait.findByIdAndUpdate(
       req.params.id,
       { status, updatedAt: new Date() },
