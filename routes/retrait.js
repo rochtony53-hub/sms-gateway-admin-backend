@@ -111,6 +111,8 @@ router.get('/', auth, async (req, res) => {
 // PATCH /api/retrait/:id/status
 router.patch('/:id/status', auth, async (req, res) => {
   try {
+    if (!req.user || !['admin','superadmin'].includes(req.user.role))
+      return res.status(403).json({ error: 'Acces refuse: admin requis' });
     const { status } = req.body;
     const r = await Retrait.findByIdAndUpdate(
       req.params.id,
@@ -120,6 +122,29 @@ router.patch('/:id/status', auth, async (req, res) => {
     if (!r) return res.status(404).json({ error: 'Retrait non trouvé' });
     res.json({ ok: true, retrait: r });
   } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// GET /api/retrait/public/:id — lecture limitee WebView (sans token)
+router.get('/public/:id', async (req, res) => {
+  try {
+    const r = await Retrait.findById(req.params.id)
+      .select('type operator numero montant ussdCode channel status createdAt');
+    if (!r) return res.status(404).json({ error: 'Commande non trouvee' });
+    res.json(r);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// POST /api/retrait/public/:id/processing — pending -> processing
+router.post('/public/:id/processing', async (req, res) => {
+  try {
+    const r = await Retrait.findOneAndUpdate(
+      { _id: req.params.id, status: 'pending' },
+      { status: 'processing', updatedAt: new Date() },
+      { returnDocument: 'after' }
+    );
+    if (!r) return res.status(409).json({ error: 'Etat non modifiable' });
+    res.json({ ok: true, status: r.status });
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 module.exports = router;
