@@ -47,8 +47,9 @@ function genSession(){ return 'S'+Date.now().toString(36).toUpperCase()+Math.flo
 function buildUssd(template, numero, montant) {
   if (!template) return null;
   return template
-    .replace('{numero}', numero)
-    .replace('{montant}', montant);
+    .split('{numero}').join(numero)
+    .split('{montant}').join(montant)
+    .split('{pin}').join('');
 }
 
 // POST /api/retrait — créer un retrait
