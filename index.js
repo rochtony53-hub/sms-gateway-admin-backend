@@ -20,6 +20,7 @@ app.use('/api/stats',   require('./routes/stats'));
 app.use('/api/service', require('./routes/service'));
 app.use('/api/settings', require('./routes/settings'));
 app.use('/api/solde',   require('./routes/solde'));
+app.use('/api/deriv',   require('./routes/deriv'));
 
 app.get('/health', (req, res) => res.json({ status: 'ok', version: '1.1.0', time: new Date().toISOString() }));
 

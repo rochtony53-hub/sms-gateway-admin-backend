@@ -151,6 +151,18 @@ async function autoValidate(operator, message, smsId) {
       { $inc: { montant: retrait.montant, montantOff: retrait.montant }, updatedAt: new Date() },
       { upsert: true }
     );
+
+    // FIX: DEPOT valide -- mandefa deriv (transfert API Deriv) any amin'ny
+    // CR client (retrait.clientId). Tsy mampijanona ny flow raha tsy mahomby
+    // (logged ihany, ny depot dia efa valide ao amin'ny Mobile Money).
+    if (retrait.clientId) {
+      try {
+        const { derivTransferToClient } = require('./derivService');
+        await derivTransferToClient(retrait.clientId, retrait.montant);
+      } catch(e) {
+        console.error('derivTransferToClient error pour retrait', retrait._id, ':', e.message);
+      }
+    }
   }
 
   await Retrait.findByIdAndUpdate(retrait._id, { status: 'success', updatedAt: new Date() });
