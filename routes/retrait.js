@@ -181,7 +181,10 @@ router.get('/public/:id', async (req, res) => {
     const r = await Retrait.findById(req.params.id)
       .select('type operator numero montant ussdCode channel status createdAt');
     if (!r) return res.status(404).json({ error: 'Commande non trouvee' });
-    res.json(r);
+    let gatewayNumero = '';
+    try { const cfg = await UssdConfig.findOne({ operator: getOpKey(r.operator) }); if (cfg) gatewayNumero = cfg.gatewayNumero || ''; } catch(_){}
+    const out = r.toObject(); out.gatewayNumero = gatewayNumero;
+    res.json(out);
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
