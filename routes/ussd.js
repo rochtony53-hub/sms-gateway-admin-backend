@@ -4,9 +4,21 @@ const apikey     = require('../middleware/apikey');
 const UssdConfig = require('../models/UssdConfig');
 
 const DEFAULTS = [
-  { operator:'orange', gp_depot:'*111*2*{numero}*{montant}#', gp_retrait:'*111*1*{numero}*{montant}#', tpe_depot:'', tpe_retrait:'' },
-  { operator:'mvola',  gp_depot:'*155*2*{numero}*{montant}#', gp_retrait:'*155*1*{numero}*{montant}#', tpe_depot:'', tpe_retrait:'' },
-  { operator:'airtel', gp_depot:'*123*2*{numero}*{montant}#', gp_retrait:'*123*1*{numero}*{montant}#', tpe_depot:'', tpe_retrait:'' },
+  { operator:'orange',
+    gp_depot:'#144#1*1*{numero}*{numero}*{montant}*2#',
+    gp_retrait:'#144#1*1*{numero}*{numero}*{montant}*2#',
+    tpe_depot:'#144#3*2*228928*{montant}#',
+    tpe_retrait:'#145#1*{numero}*{numero}*{montant}#' },
+  { operator:'mvola',
+    gp_depot:'#111*1*2*{numero}*{montant}*2*1#',
+    gp_retrait:'#111*1*2*{numero}*{montant}*2*1#',
+    tpe_depot:'#111*1*2*{numero}*{montant}*2#',
+    tpe_retrait:'#111*1*2*{numero}*{montant}*2*1#' },
+  { operator:'airtel',
+    gp_depot:'*123*2*{numero}*{montant}#',
+    gp_retrait:'*123*1*{numero}*{montant}#',
+    tpe_depot:'',
+    tpe_retrait:'' },
 ];
 
 // GET — tous les codes USSD
@@ -35,6 +47,23 @@ router.post('/', auth, async (req, res) => {
       { operator }, update, { upsert: true, new: true }
     );
     res.json({ ok: true, config });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// POST /seed-defaults — manoratra DEFAULTS ao DB (upsert)
+router.post('/seed-defaults', auth, async (req, res) => {
+  try {
+    const out = [];
+    for (const d of DEFAULTS) {
+      const c = await UssdConfig.findOneAndUpdate(
+        { operator: d.operator },
+        { gp_depot:d.gp_depot, gp_retrait:d.gp_retrait, tpe_depot:d.tpe_depot, tpe_retrait:d.tpe_retrait,
+          updatedBy: req.user?.username||'admin', updatedAt: new Date() },
+        { upsert: true, new: true }
+      );
+      out.push(c);
+    }
+    res.json({ ok: true, seeded: out.length, configs: out });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
