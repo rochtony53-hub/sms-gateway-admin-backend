@@ -143,10 +143,10 @@ async function autoValidate(operator, message, smsId) {
   }
 
   if (type === 'retrait') {
+    // RETRAIT : vola alefa amin'ny client. SMS niditra = voaray ny client -> success.
     const solde = await Solde.findOne({ operator: opKey });
     const balance = solde?.montant || 0;
     if (balance < retrait.montant) {
-      // FIX: receptionStatus = verification (montant matched fa solde tsy ampy)
       await Retrait.findByIdAndUpdate(retrait._id, {
         status: 'processing', receptionStatus: 'verification', lastUssdResponse: message, updatedAt: new Date()
       });
@@ -157,29 +157,43 @@ async function autoValidate(operator, message, smsId) {
       { operator: opKey },
       { $inc: { montant: -retrait.montant, montantOff: -retrait.montant }, updatedAt: new Date() }
     );
-  } else {
-    await Solde.findOneAndUpdate(
-      { operator: opKey },
-      { $inc: { montant: retrait.montant, montantOff: retrait.montant }, updatedAt: new Date() },
-      { upsert: true }
-    );
-
-    // FIX: DEPOT valide -- mandefa deriv (transfert API Deriv) any amin'ny
-    // CR client (retrait.clientId). Tsy mampijanona ny flow raha tsy mahomby
-    // (logged ihany, ny depot dia efa valide ao amin'ny Mobile Money).
-    if (retrait.clientId) {
-      try {
-        const { derivTransferToClient } = require('./derivService');
-        await derivTransferToClient(retrait.clientId, retrait.montant);
-      } catch(e) {
-        console.error('derivTransferToClient error pour retrait', retrait._id, ':', e.message);
-      }
-    }
+    await Retrait.findByIdAndUpdate(retrait._id, {
+      status: 'success', receptionStatus: 'confirme', lastUssdResponse: message, updatedAt: new Date()
+    });
+    if (smsId) await Sms.findByIdAndUpdate(smsId, { status: 'matched', retraitId: retrait._id });
+    return;
   }
 
-  // FIX: receptionStatus = confirme (montant matched + solde tena izy niova = OK)
+  // DEPOT : vola voaray (solde miakatra). FA status tsy 'success' raha tsy VOARAY ny Deriv.
+  await Solde.findOneAndUpdate(
+    { operator: opKey },
+    { $inc: { montant: retrait.montant, montantOff: retrait.montant }, updatedAt: new Date() },
+    { upsert: true }
+  );
+
+  let depotStatus = 'processing';
+  let derivErr = '';
+  let providerId = '';
+  if (retrait.clientId) {
+    try {
+      const { derivTransferToClient } = require('./derivService');
+      const r = await derivTransferToClient(retrait.clientId, retrait.montant);
+      depotStatus = 'success';
+      providerId = r?.transaction_id || r?.paymentagent_transfer?.transaction_id || r?.id || '';
+    } catch(e) {
+      console.error('derivTransferToClient error pour depot', retrait._id, ':', e.message);
+      depotStatus = 'processing';
+      derivErr = e.message;
+    }
+  } else {
+    depotStatus = 'processing';
+    derivErr = 'clientId (CR Deriv) manquant';
+  }
+
   await Retrait.findByIdAndUpdate(retrait._id, {
-    status: 'success', receptionStatus: 'confirme', lastUssdResponse: message, updatedAt: new Date()
+    status: depotStatus, receptionStatus: 'confirme',
+    providerId: providerId, response: derivErr,
+    lastUssdResponse: message, updatedAt: new Date()
   });
   if (smsId) await Sms.findByIdAndUpdate(smsId, { status: 'matched', retraitId: retrait._id });
 }
@@ -279,5 +293,38 @@ router.delete('/:id', auth, async (req, res) => {
     res.json({ ok: true });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
+
+// RELANCE AUTO DEPOT (Deriv) isaky 5 min. Timeout 30 min -> failed.
+const DEPOT_DERIV_TIMEOUT_MS = 30 * 60 * 1000;
+async function autoRelanceDepotsDeriv() {
+  try {
+    const cutoff = new Date(Date.now() - DEPOT_DERIV_TIMEOUT_MS);
+    const depots = await Retrait.find({
+      type: 'depot', status: 'processing', receptionStatus: 'confirme',
+      clientId: { $nin: [null, ''] }
+    }).lean();
+    for (const d of depots) {
+      if (d.createdAt && new Date(d.createdAt) < cutoff) {
+        await Retrait.findByIdAndUpdate(d._id, { status: 'failed', updatedAt: new Date() });
+        continue;
+      }
+      try {
+        const { derivTransferToClient } = require('./derivService');
+        const r = await derivTransferToClient(d.clientId, d.montant);
+        const providerId = r?.transaction_id || r?.paymentagent_transfer?.transaction_id || r?.id || '';
+        await Retrait.findByIdAndUpdate(d._id, {
+          status: 'success', providerId, response: '',
+          relanceCount: (d.relanceCount||0)+1, lastRelanceAt: new Date(), updatedAt: new Date()
+        });
+      } catch(e) {
+        await Retrait.findByIdAndUpdate(d._id, {
+          response: e.message, relanceCount: (d.relanceCount||0)+1,
+          lastRelanceAt: new Date(), updatedAt: new Date()
+        });
+      }
+    }
+  } catch(e) { console.error('autoRelanceDepotsDeriv:', e.message); }
+}
+setInterval(autoRelanceDepotsDeriv, 5 * 60 * 1000);
 
 module.exports = router;
