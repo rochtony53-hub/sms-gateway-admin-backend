@@ -50,13 +50,16 @@ async function derivCheckCredited(crClient, montantUsd, sinceEpoch) {
   const r = await derivCall(cfg, { statement: 1, description: 1, limit: 50 });
   const txs = r?.statement?.transactions || [];
   const target = Math.round(Number(montantUsd) * 100) / 100;
+  const cr = String(crClient || '').toUpperCase();
   for (const t of txs) {
     const amt = Number(t.amount) || 0;
     const when = Number(t.transaction_time) || 0;
+    const isDeposit = (t.action_type === 'deposit') && amt > 0;
     const amountMatch = Math.abs(amt - target) < 0.001;
-    const timeOk = !sinceEpoch || when >= (sinceEpoch - 60);
-    const fromClient = !crClient || JSON.stringify(t).toLowerCase().includes(String(crClient).toLowerCase());
-    if (amt > 0 && amountMatch && timeOk && fromClient) {
+    const timeOk = !sinceEpoch || when >= (sinceEpoch - 120);
+    const longcode = String(t.longcode || '').toUpperCase();
+    const fromClient = !cr || longcode.includes(cr);
+    if (isDeposit && amountMatch && timeOk && fromClient) {
       return { credited: true, transaction_id: t.transaction_id || '', raw: t };
     }
   }

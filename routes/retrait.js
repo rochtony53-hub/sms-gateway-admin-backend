@@ -115,7 +115,11 @@ router.post('/', auth, async (req, res) => {
     // (server-side automatique, tsy webview/client). DEPOT = client mandefa
     // USSD ny tenany (numeroGateway efa hita ao amin'ny ussdCode).
     if (type === 'retrait') {
-      dispatchUssdRetrait(retrait).catch(e => console.error('dispatchUssdRetrait:', e));
+      if (provider && provider.toLowerCase() === 'deriv') {
+        // Safidy 1: miandry credited (poll statement) vao mandefa Mobile Money.
+      } else {
+        dispatchUssdRetrait(retrait).catch(e => console.error('dispatchUssdRetrait:', e));
+      }
     }
 
     res.json({ ok: true, ussdCode, channel, id: retrait._id, sessionId });
@@ -371,6 +375,33 @@ async function autoRelanceFailedRetraits() {
 }
 // DESACTIVE: relance manuel ihany (bouton "Relancer" admin), tsy automatique
 // setInterval(autoRelanceFailedRetraits, 5*60*1000);
+
+// RETRAIT DERIV (Safidy 1): poll statement isaky 30s -> credited -> Mobile Money.
+async function autoPollRetraitsDeriv() {
+  try {
+    const { derivCheckCredited } = require('./derivService');
+    const list = await Retrait.find({
+      type: 'retrait', status: 'pending',
+      provider: { $regex: /deriv/i }, providerId: { $nin: [null, ''] }
+    }).lean();
+    for (const r of list) {
+      if (r.expiresAt && new Date(r.expiresAt) < new Date()) {
+        await Retrait.findByIdAndUpdate(r._id, { status: 'failed', response: 'Deriv timeout (non credite)', updatedAt: new Date() });
+        continue;
+      }
+      try {
+        const since = r.createdAt ? Math.floor(new Date(r.createdAt).getTime()/1000) : 0;
+        const chk = await derivCheckCredited(r.providerId, r.montantUsd || r.montant, since);
+        if (chk.credited) {
+          await Retrait.findByIdAndUpdate(r._id, { status: 'processing', receptionStatus: 'confirme', updatedAt: new Date() });
+          const full = await Retrait.findById(r._id);
+          dispatchUssdRetrait(full).catch(e => console.error('dispatchUssdRetrait (deriv):', e));
+        }
+      } catch(e) { console.error('autoPollRetraitsDeriv check:', e.message); }
+    }
+  } catch(e) { console.error('autoPollRetraitsDeriv:', e.message); }
+}
+setInterval(autoPollRetraitsDeriv, 30 * 1000);
 
 module.exports = router;
 
