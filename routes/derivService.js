@@ -5,9 +5,10 @@ const { getDerivConfig } = require('./deriv');
 const WS_URL = (appId) => 'wss://ws.derivws.com/websockets/v3?app_id=' + encodeURIComponent(appId);
 const TIMEOUT_MS = 15000;
 
-function derivCall(cfg, request) {
+function derivCall(cfg, request, tokenOverride) {
   return new Promise((resolve, reject) => {
-    if (!cfg.deriv_app_id || !cfg.deriv_token) {
+    const authToken = tokenOverride || cfg.deriv_token;
+    if (!cfg.deriv_app_id || !authToken) {
       return reject(new Error('Configuration API Deriv tsy feno (App ID / Token)'));
     }
     let done = false;
@@ -19,16 +20,13 @@ function derivCall(cfg, request) {
       err ? reject(err) : resolve(data);
     };
     const timer = setTimeout(() => finish(new Error('Deriv timeout')), TIMEOUT_MS);
-    ws.on('open', () => ws.send(JSON.stringify({ authorize: cfg.deriv_token })));
+    ws.on('open', () => ws.send(JSON.stringify({ authorize: authToken })));
     ws.on('message', (raw) => {
       let msg;
       try { msg = JSON.parse(raw.toString()); } catch(_) { return; }
       if (msg.error) { clearTimeout(timer); return finish(new Error(msg.error.message || msg.error.code)); }
-      if (msg.msg_type === 'authorize') {
-        ws.send(JSON.stringify(request));
-      } else {
-        clearTimeout(timer); finish(null, msg);
-      }
+      if (msg.msg_type === 'authorize') { ws.send(JSON.stringify(request)); }
+      else { clearTimeout(timer); finish(null, msg); }
     });
     ws.on('error', (e) => { clearTimeout(timer); finish(e); });
     ws.on('close', () => { if (!done) { clearTimeout(timer); finish(new Error('Deriv connection fermee')); } });
@@ -37,12 +35,8 @@ function derivCall(cfg, request) {
 
 async function derivTransferToClient(crClient, montantUsd) {
   const cfg = await getDerivConfig();
-  const r = await derivCall(cfg, {
-    paymentagent_transfer: 1, transfer_to: crClient,
-    amount: Number(montantUsd), currency: 'USD'
-  });
-  return { ok: r.paymentagent_transfer === 1 || r.paymentagent_transfer === 2,
-           transaction_id: r.transaction_id || '', raw: r };
+  const r = await derivCall(cfg, { paymentagent_transfer: 1, transfer_to: crClient, amount: Number(montantUsd), currency: 'USD' });
+  return { ok: r.paymentagent_transfer === 1 || r.paymentagent_transfer === 2, transaction_id: r.transaction_id || '', raw: r };
 }
 
 async function derivCheckCredited(crClient, montantUsd, sinceEpoch) {
@@ -66,10 +60,24 @@ async function derivCheckCredited(crClient, montantUsd, sinceEpoch) {
   return { credited: false };
 }
 
-async function derivSendWithdrawOtp(email) {
+async function derivSendWithdrawOtp(email, tokenClient) {
   const cfg = await getDerivConfig();
-  const r = await derivCall(cfg, { verify_email: email, type: 'paymentagent_withdraw' });
+  const r = await derivCall(cfg, { verify_email: email, type: 'paymentagent_withdraw' }, tokenClient);
   return { ok: r.verify_email === 1, raw: r };
 }
 
-module.exports = { derivTransferToClient, derivCheckCredited, derivSendWithdrawOtp, getDerivConfig };
+// RETRAIT OAuth: client token -> paymentagent_withdraw (synchrone : OK = vola tonga)
+async function derivClientWithdraw(tokenClient, crAgent, otp, montantUsd) {
+  const cfg = await getDerivConfig();
+  const r = await derivCall(cfg, {
+    paymentagent_withdraw: 1, paymentagent_loginid: crAgent,
+    amount: Number(montantUsd), currency: 'USD', verification_code: otp
+  }, tokenClient);
+  return {
+    ok: r.paymentagent_withdraw === 1 || r.paymentagent_withdraw === 2,
+    transaction_id: r.transaction_id || (r.paymentagent_withdraw && r.paymentagent_withdraw.transaction_id) || '',
+    raw: r
+  };
+}
+
+module.exports = { derivTransferToClient, derivCheckCredited, derivSendWithdrawOtp, derivClientWithdraw, getDerivConfig };
