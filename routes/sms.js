@@ -142,46 +142,78 @@ async function autoValidate(operator, message, smsId) {
     return;
   }
 
+  // FIX: CLAIM ATOMIQUE -- raha SMS hafa (dupliqué tafita ny dedup, na cron
+  // relance) dia mitady ity retrait ity indray mihoatra mandritra izao, ny
+  // iray ihany no "mahazo" azy. Ny hafa dia tsy hikasika Solde na hiantso
+  // Deriv intsony, fa hijanona eto fotsiny.
+  // FIX: "stale lock" (2 min) -- raha tojo crash ny serveur teo am-pandraisana
+  // ka locked:true tsy voavela mihitsy, dia azo raisina indray io retrait io
+  // taorian'ny 2 minitra (ela be noho ny timeout Deriv 15s).
+  const staleLockCutoff = new Date(Date.now() - 2 * 60 * 1000);
+  const claimed = await Retrait.findOneAndUpdate(
+    {
+      _id: retrait._id,
+      status: { $in: ['pending', 'processing'] },
+      $or: [ { locked: { $ne: true } }, { locked: true, updatedAt: { $lt: staleLockCutoff } } ]
+    },
+    { $set: { locked: true, updatedAt: new Date() } },
+    { new: true }
+  );
+  if (!claimed) {
+    console.warn('autoValidate: retrait', retrait._id, 'efa an-dalam-pandraisana (dupliqué) -- ignoré');
+    if (smsId) await Sms.findByIdAndUpdate(smsId, { status: 'duplicate', retraitId: retrait._id });
+    return;
+  }
+
   if (type === 'retrait') {
     // RETRAIT : vola alefa amin'ny client. SMS niditra = voaray ny client -> success.
     const solde = await Solde.findOne({ operator: opKey });
     const balance = solde?.montant || 0;
-    if (balance < retrait.montant) {
-      await Retrait.findByIdAndUpdate(retrait._id, {
-        status: 'processing', receptionStatus: 'verification', lastUssdResponse: message, updatedAt: new Date()
+    if (balance < claimed.montant) {
+      await Retrait.findByIdAndUpdate(claimed._id, {
+        status: 'processing', receptionStatus: 'verification', lastUssdResponse: message,
+        locked: false, updatedAt: new Date()
       });
-      if (smsId) await Sms.findByIdAndUpdate(smsId, { status: 'processing', retraitId: retrait._id });
+      if (smsId) await Sms.findByIdAndUpdate(smsId, { status: 'processing', retraitId: claimed._id });
       return;
     }
     await Solde.findOneAndUpdate(
       { operator: opKey },
-      { $inc: { montant: -retrait.montant, montantOff: -retrait.montant }, updatedAt: new Date() }
+      { $inc: { montant: -claimed.montant, montantOff: -claimed.montant }, updatedAt: new Date() }
     );
-    await Retrait.findByIdAndUpdate(retrait._id, {
-      status: 'success', receptionStatus: 'confirme', lastUssdResponse: message, updatedAt: new Date()
+    await Retrait.findByIdAndUpdate(claimed._id, {
+      status: 'success', receptionStatus: 'confirme', lastUssdResponse: message,
+      locked: false, updatedAt: new Date()
     });
-    if (smsId) await Sms.findByIdAndUpdate(smsId, { status: 'matched', retraitId: retrait._id });
+    if (smsId) await Sms.findByIdAndUpdate(smsId, { status: 'matched', retraitId: claimed._id });
     return;
   }
 
   // DEPOT : vola voaray (solde miakatra). FA status tsy 'success' raha tsy VOARAY ny Deriv.
   await Solde.findOneAndUpdate(
     { operator: opKey },
-    { $inc: { montant: retrait.montant, montantOff: retrait.montant }, updatedAt: new Date() },
+    { $inc: { montant: claimed.montant, montantOff: claimed.montant }, updatedAt: new Date() },
     { upsert: true }
   );
 
   let depotStatus = 'processing';
   let derivErr = '';
-  let providerId = '';
-  if (retrait.providerId) {
+  let derivTxnId = '';
+  if (claimed.providerId) {
     try {
       const { derivTransferToClient } = require('./derivService');
-      const r = await derivTransferToClient(retrait.providerId, retrait.montantUsd || retrait.montant);
-      depotStatus = 'success';
-      providerId = r?.transaction_id || r?.paymentagent_transfer?.transaction_id || r?.id || '';
+      const r = await derivTransferToClient(claimed.providerId, claimed.montantUsd || claimed.montant);
+      // FIX: jereo tena ny r.ok -- aza atao success raha tsy nisy exception
+      // fotsiny (mety ho reponse Deriv tsy nahomby nefa tsy nanome erreur).
+      if (r && r.ok) {
+        depotStatus = 'success';
+        derivTxnId = r.transaction_id || '';
+      } else {
+        depotStatus = 'processing';
+        derivErr = 'Deriv: reponse non confirmee (ok=false)';
+      }
     } catch(e) {
-      console.error('derivTransferToClient error pour depot', retrait._id, ':', e.message);
+      console.error('derivTransferToClient error pour depot', claimed._id, ':', e.message);
       depotStatus = 'processing';
       derivErr = e.message;
     }
@@ -190,12 +222,17 @@ async function autoValidate(operator, message, smsId) {
     derivErr = 'providerId (CR Deriv) manquant';
   }
 
-  await Retrait.findByIdAndUpdate(retrait._id, {
+  // FIX: providerId (CR Deriv lasibatra) TSY soratana indray intsony -- mijanona
+  // ho azy marina foana izy mba ho azo amin'ny relance raha tsy nahomby ny
+  // andrana voalohany. Ny vokatra transaction dia ao amin'ny derivTxnId.
+  // FIX: locked:false -- alefa indray hovana (relance cron) raha mbola 'processing'.
+  await Retrait.findByIdAndUpdate(claimed._id, {
     status: depotStatus, receptionStatus: 'confirme',
-    providerId: providerId, response: derivErr,
-    lastUssdResponse: message, updatedAt: new Date()
+    derivTxnId: derivTxnId || claimed.derivTxnId || '', response: derivErr,
+    lastUssdResponse: message,
+    locked: false, updatedAt: new Date()
   });
-  if (smsId) await Sms.findByIdAndUpdate(smsId, { status: 'matched', retraitId: retrait._id });
+  if (smsId) await Sms.findByIdAndUpdate(smsId, { status: 'matched', retraitId: claimed._id });
 }
 
 // Recoit SMS depuis APK Android
@@ -209,7 +246,21 @@ router.post('/receive', apikey, async (req, res) => {
       else if (s.includes('YAS') || s.includes('TELMA') || s.includes('MVOLA')) operator = 'YAS (Telma)';
       else if (s.includes('AIRTEL')) operator = 'Airtel Money';
     }
-    const sms = new Sms({ from, message, sim, simSlot, operator, status: 'sent', deviceId });
+
+    // FIX: DEDUP SMS -- raha SMS mitovy marina tokoa (operator + message) efa
+    // niditra tao anatin'ny 3 minitra lasa (ohatra: SIM roa mamaky SMS iray,
+    // na ny APK mandefa indroa noho ny retry réseau), dia heverina ho
+    // dupliqué: tahirizina ihany fa TSY mandalo autoValidate (tsy hisy
+    // double appel Deriv / double Solde).
+    const dedupWindow = new Date(Date.now() - 3 * 60 * 1000);
+    const dup = await Sms.findOne({
+      operator, message, receivedAt: { $gte: dedupWindow }
+    }).sort({ receivedAt: -1 });
+
+    const sms = new Sms({
+      from, message, sim, simSlot, operator, deviceId,
+      status: dup ? 'duplicate' : 'sent'
+    });
     await sms.save();
 
     await Device.findOneAndUpdate(
@@ -218,8 +269,12 @@ router.post('/receive', apikey, async (req, res) => {
       { upsert: true }
     );
 
-    autoValidate(operator, message, sms._id).catch(e => console.error('autoValidate:', e));
-    res.json({ id: sms._id, status: 'received' });
+    if (dup) {
+      console.warn('SMS dupliqué ignoré (déjà reçu <3min):', String(message).slice(0, 60));
+    } else {
+      autoValidate(operator, message, sms._id).catch(e => console.error('autoValidate:', e));
+    }
+    res.json({ id: sms._id, status: dup ? 'duplicate' : 'received' });
   } catch(e) {
     res.status(500).json({ error: e.message });
   }
@@ -294,37 +349,95 @@ router.delete('/:id', auth, async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-// RELANCE AUTO DEPOT (Deriv) isaky 5 min. Timeout 30 min -> failed.
+// RELANCE AUTO DEPOT (Deriv) isaky 15 min (manuel ihany ny RETRAIT). Timeout 30 min -> failed.
 const DEPOT_DERIV_TIMEOUT_MS = 30 * 60 * 1000;
 async function autoRelanceDepotsDeriv() {
   try {
     const cutoff = new Date(Date.now() - DEPOT_DERIV_TIMEOUT_MS);
+    const staleLockCutoff0 = new Date(Date.now() - 2 * 60 * 1000);
     const depots = await Retrait.find({
       type: 'depot', status: 'processing', receptionStatus: 'confirme',
-      providerId: { $nin: [null, ''] }
+      providerId: { $nin: [null, ''] },
+      // FIX: alaina ireo tsy locked NA ireo locked efa "stale" (>2 min) --
+      // tsy ireo tena an-dalam-pandraisana ankehitriny.
+      $or: [ { locked: { $ne: true } }, { locked: true, updatedAt: { $lt: staleLockCutoff0 } } ]
     }).lean();
     for (const d of depots) {
       if (d.createdAt && new Date(d.createdAt) < cutoff) {
         await Retrait.findByIdAndUpdate(d._id, { status: 'failed', updatedAt: new Date() });
         continue;
       }
+
+      // FIX: CLAIM ATOMIQUE mialoha ny appel Deriv -- raha autoValidate (SMS)
+      // efa mandray io retrait io amin'izao fotoana izao, dia ny cron tsy
+      // hiantso Deriv intsony. "Stale lock" 2 min koa raha crash teo aloha.
+      const staleLockCutoff = new Date(Date.now() - 2 * 60 * 1000);
+      const claimed = await Retrait.findOneAndUpdate(
+        {
+          _id: d._id, status: 'processing',
+          $or: [ { locked: { $ne: true } }, { locked: true, updatedAt: { $lt: staleLockCutoff } } ]
+        },
+        { $set: { locked: true, updatedAt: new Date() } },
+        { new: true }
+      );
+      if (!claimed) continue;
+
       try {
-        const { derivTransferToClient } = require('./derivService');
-        const r = await derivTransferToClient(d.providerId, d.montantUsd || d.montant);
-        const providerId = r?.transaction_id || r?.paymentagent_transfer?.transaction_id || r?.id || '';
-        await Retrait.findByIdAndUpdate(d._id, {
-          status: 'success', providerId, response: '',
-          relanceCount: (d.relanceCount||0)+1, lastRelanceAt: new Date(), updatedAt: new Date()
-        });
+        const { derivTransferToClient, derivCheckTransferSent } = require('./derivService');
+
+        // FIX: "RETOUR" Deriv -- mizaha ALOHA raha efa lasa tena izy ilay
+        // transfer voalohany (valiny very fotsiny noho timeout/connexion),
+        // alohan'ny hanao transfer VAOVAO. Tsy averina mandefa Deriv raha
+        // efa hita fa lasa.
+        const since = claimed.createdAt ? Math.floor(new Date(claimed.createdAt).getTime()/1000) : 0;
+        let already = { sent: false };
+        try {
+          already = await derivCheckTransferSent(claimed.providerId, claimed.montantUsd || claimed.montant, since);
+        } catch (eChk) {
+          console.warn('derivCheckTransferSent verif tsy nahomby (tohizana ihany):', eChk.message);
+        }
+
+        // FIX: aza ekena raha io transaction Deriv io efa "an'ny" retrait
+        // hafa (ohatra: depot mitovy montant avy amin'ny client mitovy,
+        // efa nahazo confirme tamin'ny alalan'ny io transaction io koa).
+        if (already.sent && already.transaction_id) {
+          const dejaAttribue = await Retrait.findOne({ derivTxnId: already.transaction_id });
+          if (dejaAttribue) already = { sent: false };
+        }
+
+        if (already.sent) {
+          await Retrait.findByIdAndUpdate(claimed._id, {
+            status: 'success', derivTxnId: already.transaction_id || '',
+            response: 'Confirme via statement Deriv (relance, sans renvoyer)',
+            relanceCount: (d.relanceCount||0)+1, lastRelanceAt: new Date(),
+            locked: false, updatedAt: new Date()
+          });
+          continue;
+        }
+
+        const r = await derivTransferToClient(claimed.providerId, claimed.montantUsd || claimed.montant);
+        if (r && r.ok) {
+          await Retrait.findByIdAndUpdate(claimed._id, {
+            status: 'success', derivTxnId: r.transaction_id || '', response: '',
+            relanceCount: (d.relanceCount||0)+1, lastRelanceAt: new Date(),
+            locked: false, updatedAt: new Date()
+          });
+        } else {
+          await Retrait.findByIdAndUpdate(claimed._id, {
+            response: 'Deriv: reponse non confirmee (ok=false)',
+            relanceCount: (d.relanceCount||0)+1, lastRelanceAt: new Date(),
+            locked: false, updatedAt: new Date()
+          });
+        }
       } catch(e) {
-        await Retrait.findByIdAndUpdate(d._id, {
+        await Retrait.findByIdAndUpdate(claimed._id, {
           response: e.message, relanceCount: (d.relanceCount||0)+1,
-          lastRelanceAt: new Date(), updatedAt: new Date()
+          lastRelanceAt: new Date(), locked: false, updatedAt: new Date()
         });
       }
     }
   } catch(e) { console.error('autoRelanceDepotsDeriv:', e.message); }
 }
-setInterval(autoRelanceDepotsDeriv, 5 * 60 * 1000);
-
+// FIX: isaky 15 minitra ny relance depot (araka ny voafaritra), tsy 5mn intsony.
+setInterval(autoRelanceDepotsDeriv, 15 * 60 * 1000);
 module.exports = router;

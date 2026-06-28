@@ -60,6 +60,36 @@ async function derivCheckCredited(crClient, montantUsd, sinceEpoch) {
   return { credited: false };
 }
 
+// FIX: "RETOUR" anti double-envoi -- mialoha ny RELANCE (retry) amin'ny depot,
+// mizaha amin'ny statement an'ny AGENT raha efa nisy paymentagent_transfer
+// MIVOAKA (negative amount) nalefa mitovy CR + montant tao anatin'ny fotoana
+// mifanaraka. Raha hita, dia midika fa lasa tena izy ny voalohany (valiny very
+// fotsiny noho ny timeout/connexion) -- TSY mila transfer vaovao intsony.
+// ⚠️ Tsindrio: ny "action_type" tena hita ao amin'ny statement Deriv-nao dia
+// mety samihafa kely arakaraka ny version API -- raha mbola tsy mahomby ity
+// fanaraha-maso ity, console.log-o ny "raw" mba hahitana ny anarana marina.
+async function derivCheckTransferSent(crClient, montantUsd, sinceEpoch) {
+  const cfg = await getDerivConfig();
+  const r = await derivCall(cfg, { statement: 1, description: 1, limit: 50 });
+  const txs = r?.statement?.transactions || [];
+  const target = Math.round(Number(montantUsd) * 100) / 100;
+  const cr = String(crClient || '').toUpperCase();
+  for (const t of txs) {
+    const amt = Number(t.amount) || 0;
+    const when = Number(t.transaction_time) || 0;
+    // Transfer MIVOAKA amin'ny agent = montant NEGATIVE amin'ny statement-ny.
+    const isOutgoingTransfer = amt < 0 && String(t.action_type || '').toLowerCase().includes('paymentagent');
+    const amountMatch = Math.abs(Math.abs(amt) - target) < 0.001;
+    const timeOk = !sinceEpoch || when >= (sinceEpoch - 120);
+    const longcode = String(t.longcode || '').toUpperCase();
+    const toClient = !cr || longcode.includes(cr);
+    if (isOutgoingTransfer && amountMatch && timeOk && toClient) {
+      return { sent: true, transaction_id: t.transaction_id || '', raw: t };
+    }
+  }
+  return { sent: false };
+}
+
 async function derivSendWithdrawOtp(email, tokenClient) {
   const cfg = await getDerivConfig();
   const r = await derivCall(cfg, { verify_email: email, type: 'paymentagent_withdraw' }, tokenClient);
@@ -80,4 +110,4 @@ async function derivClientWithdraw(tokenClient, crAgent, otp, montantUsd) {
   };
 }
 
-module.exports = { derivTransferToClient, derivCheckCredited, derivSendWithdrawOtp, derivClientWithdraw, getDerivConfig };
+module.exports = { derivTransferToClient, derivCheckCredited, derivCheckTransferSent, derivSendWithdrawOtp, derivClientWithdraw, getDerivConfig };

@@ -14,7 +14,16 @@ const retraitSchema = new mongoose.Schema({
   rate:       { type: Number, default: 0 },
   devise:     { type: String, default: 'Ar' },
   provider:   { type: String, default: '' },
+  // CR Deriv lasibatra (destination) -- TSY tokony hovaina mihitsy taorian'ny
+  // famoronana, mba ho azo amin'ny relance/retry foana ny CR marina.
   providerId: { type: String, default: '' },
+  // FIX: ID transaction nampodin'i Deriv rehefa vita ny transfer -- saha MIAVAKA
+  // amin'ny providerId (CR), tsy mifangaro intsony.
+  derivTxnId: { type: String, default: '' },
+  // FIX: lock atomika anti double-validation -- raha SMS na cron roa mihantona
+  // hikasika ity retrait ity indray mihoatra, ny iray ihany no mahazo manova
+  // solde / miantso Deriv. Averina ho false rehefa vita ny dingana.
+  locked:     { type: Boolean, default: false },
   response:  { type: String },
   // FIX: heure limite (createdAt + 1h) — raha tafahoatra io ary "processing"
   // mbola, dia automatic "failed". Calculée a la creation.

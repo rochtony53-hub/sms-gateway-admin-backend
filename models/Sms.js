@@ -9,7 +9,8 @@ const smsSchema = new mongoose.Schema({
   // pending: tsy mbola noraisina | sent: avy tao amin'ny APK
   // matched: nifanaraka tamin'ny retrait (success) | failed: tsy mitovy template, refusé
   // processing: mitovy template fa miandry validation manuel
-  status:    { type: String, enum: ['pending','sent','failed','matched','processing'], default: 'pending' },
+  // duplicate: FIX -- SMS mitovy (operator+message) efa niditra vetivety lasa
+  status:    { type: String, enum: ['pending','sent','failed','matched','processing','duplicate'], default: 'pending' },
   // Retrait izay mifandraika amin'ity SMS ity (raha misy)
   retraitId: { type: mongoose.Schema.Types.ObjectId, ref: 'Retrait' },
   deviceId:  { type: String },
