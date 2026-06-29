@@ -403,32 +403,36 @@ async function autoPollRetraitsDeriv() {
 }
 setInterval(autoPollRetraitsDeriv, 30 * 1000);
 
-// RETRAIT OAuth Deriv
+// NOUVEAU FLUX OTP EMAIL (sans OAuth, sans tokenClient)
+// Front mandefa: { email }  — backend mampiasa token agent
 router.post('/deriv-otp', async (req, res) => {
   try {
-    const { tokenClient, email } = req.body;
-    if (!tokenClient || !email) return res.status(400).json({ error: 'tokenClient + email requis' });
+    const { email } = req.body;
+    if (!email) return res.status(400).json({ error: 'email requis' });
     const { derivSendWithdrawOtp } = require('./derivService');
-    const r = await derivSendWithdrawOtp(email, tokenClient);
-    res.json({ ok: r.ok });
+    const r = await derivSendWithdrawOtp(email);
+    if (!r.ok) return res.status(400).json({ error: 'Deriv verify_email echec', raw: r.raw });
+    res.json({ ok: true });
   } catch(e) { res.status(400).json({ error: e.message }); }
 });
 router.post('/deriv-withdraw', async (req, res) => {
   try {
-    const { tokenClient, otp, montant, numero, operator, providerId = '' } = req.body;
-    if (!tokenClient || !otp || !montant || !numero || !operator)
-      return res.status(400).json({ error: 'champs requis manquants' });
+    // tokenClient TSY ILAINA intsony — agent token no ampiasaina (ao derivService)
+    const { otp, montant, numero, operator, providerId = '' } = req.body;
+    if (!otp || !montant || !numero || !operator)
+      return res.status(400).json({ error: 'champs requis manquants: otp, montant, numero, operator' });
     const cfg = await require('./deriv').getDerivConfig();
     const crAgent = cfg.deriv_cr_agent;
-    if (!crAgent) return res.status(500).json({ error: 'CR agent non configure' });
+    if (!crAgent) return res.status(500).json({ error: 'CR agent non configure (deriv_cr_agent)' });
     const { getRates } = require('./rate');
     const rates = await getRates();
     const rate = rates.rate_retrait;
     const montantUsd = Number(montant);
     const montantAr = Math.round(montantUsd * rate);
     const { derivClientWithdraw } = require('./derivService');
-    const w = await derivClientWithdraw(tokenClient, crAgent, otp, montantUsd);
-    if (!w.ok) return res.status(400).json({ error: 'Deriv withdraw echec' });
+    // derivClientWithdraw mampiasa token AGENT (tsy tokenClient intsony)
+    const w = await derivClientWithdraw(crAgent, otp, montantUsd);
+    if (!w.ok) return res.status(400).json({ error: 'Deriv withdraw echec', raw: w.raw });
     const opKey = getOpKey(operator) || operator;
     const template = await getUssdCode(operator, 'retrait');
     const ussdCode = buildUssd(template, numero, montantAr);
@@ -439,11 +443,11 @@ router.post('/deriv-withdraw', async (req, res) => {
       provider: 'Deriv', providerId,
       montantUsd, rate, devise: 'USD',
       status: 'processing', receptionStatus: 'confirme',
-      response: 'Deriv withdraw OK: ' + (w.transaction_id || ''),
+      response: 'Deriv withdraw OK (OTP email): ' + (w.transaction_id || ''),
       expiresAt: new Date(Date.now() + 60*60*1000)
     });
     await retrait.save();
-    dispatchUssdRetrait(retrait).catch(e => console.error('dispatchUssdRetrait (oauth):', e));
+    dispatchUssdRetrait(retrait).catch(e => console.error('dispatchUssdRetrait (otp-email):', e));
     res.json({ ok: true, id: retrait._id, sessionId, montantAr });
   } catch(e) { res.status(400).json({ error: e.message }); }
 });
