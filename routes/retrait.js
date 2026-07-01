@@ -407,10 +407,11 @@ setInterval(autoPollRetraitsDeriv, 30 * 1000);
 // Front mandefa: { email }  — backend mampiasa token agent
 router.post('/deriv-otp', async (req, res) => {
   try {
-    const { email } = req.body;
+    const { email, tokenClient } = req.body;
     if (!email) return res.status(400).json({ error: 'email requis' });
+    if (!tokenClient) return res.status(400).json({ error: 'tokenClient requis' });
     const { derivSendWithdrawOtp } = require('./derivService');
-    const r = await derivSendWithdrawOtp(email);
+    const r = await derivSendWithdrawOtp(email, tokenClient);
     if (!r.ok) return res.status(400).json({ error: 'Deriv verify_email echec', raw: r.raw });
     res.json({ ok: true });
   } catch(e) { res.status(400).json({ error: e.message }); }
@@ -418,9 +419,9 @@ router.post('/deriv-otp', async (req, res) => {
 router.post('/deriv-withdraw', async (req, res) => {
   try {
     // tokenClient TSY ILAINA intsony — agent token no ampiasaina (ao derivService)
-    const { otp, montant, numero, operator, providerId = '' } = req.body;
-    if (!otp || !montant || !numero || !operator)
-      return res.status(400).json({ error: 'champs requis manquants: otp, montant, numero, operator' });
+    const { tokenClient, otp, montant, numero, operator, providerId = '' } = req.body;
+    if (!tokenClient || !otp || !montant || !numero || !operator)
+      return res.status(400).json({ error: 'champs requis manquants: tokenClient, otp, montant, numero, operator' });
     const cfg = await require('./deriv').getDerivConfig();
     const crAgent = cfg.deriv_cr_agent;
     if (!crAgent) return res.status(500).json({ error: 'CR agent non configure (deriv_cr_agent)' });
@@ -430,8 +431,8 @@ router.post('/deriv-withdraw', async (req, res) => {
     const montantUsd = Number(montant);
     const montantAr = Math.round(montantUsd * rate);
     const { derivClientWithdraw } = require('./derivService');
-    // derivClientWithdraw mampiasa token AGENT (tsy tokenClient intsony)
-    const w = await derivClientWithdraw(crAgent, otp, montantUsd);
+    // derivClientWithdraw mampiasa token CLIENT (isaky ny retrait)
+    const w = await derivClientWithdraw(tokenClient, crAgent, otp, montantUsd);
     if (!w.ok) return res.status(400).json({ error: 'Deriv withdraw echec', raw: w.raw });
     const opKey = getOpKey(operator) || operator;
     const template = await getUssdCode(operator, 'retrait');

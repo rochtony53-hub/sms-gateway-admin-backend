@@ -62,16 +62,16 @@ async function derivCheckCredited(crClient, montantUsd, sinceEpoch) {
 
 // NOUVEAU FLUX OTP EMAIL : token AGENT foana (tsy mila tokenClient intsony)
 // Deriv mandefa verification_code any amin'ny email client
-async function derivSendWithdrawOtp(email) {
+async function derivSendWithdrawOtp(email, tokenClient) {
   const cfg = await getDerivConfig();
   // authorize amin'ny token AGENT — Deriv mandefa OTP any amin'ny email client
-  const r = await derivCall(cfg, { verify_email: email, type: 'paymentagent_withdraw' });
+  const r = await derivCall(cfg, { verify_email: email, type: 'paymentagent_withdraw' }, tokenClient);
   return { ok: r.verify_email === 1, raw: r };
 }
 
 // RETRAIT OTP EMAIL : token AGENT + verification_code (avy amin'ny email client)
 // Ny client no maka vola avy amin'ny account-ny, ka ny agent no mpanampy (paymentagent_withdraw)
-async function derivClientWithdraw(crAgent, otp, montantUsd) {
+async function derivClientWithdraw(tokenClient, crAgent, otp, montantUsd) {
   const cfg = await getDerivConfig();
   // Authorize amin'ny token AGENT — izy no mampandeha ny withdraw ho an'ny client
   const r = await derivCall(cfg, {
@@ -80,7 +80,7 @@ async function derivClientWithdraw(crAgent, otp, montantUsd) {
     amount: Number(montantUsd),
     currency: 'USD',
     verification_code: otp
-  });
+  }, tokenClient);
   return {
     ok: r.paymentagent_withdraw === 1 || r.paymentagent_withdraw === 2,
     transaction_id: r.transaction_id || (r.paymentagent_withdraw && r.paymentagent_withdraw.transaction_id) || '',
