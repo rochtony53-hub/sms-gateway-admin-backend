@@ -17,6 +17,7 @@ const retraitSchema = new mongoose.Schema({
   // CR Deriv lasibatra (destination) -- TSY tokony hovaina mihitsy taorian'ny
   // famoronana, mba ho azo amin'ny relance/retry foana ny CR marina.
   providerId: { type: String, default: '' },
+  derivRequestId: { type: String, default: '', index: true },
   // FIX: ID transaction nampodin'i Deriv rehefa vita ny transfer -- saha MIAVAKA
   // amin'ny providerId (CR), tsy mifangaro intsony.
   derivTxnId: { type: String, default: '' },

@@ -406,11 +406,11 @@ setInterval(autoPollRetraitsDeriv, 30 * 1000);
 // RETRAIT OAuth Deriv
 router.post('/deriv-otp', async (req, res) => {
   try {
-    const { tokenClient, email } = req.body;
-    if (!tokenClient || !email) return res.status(400).json({ error: 'tokenClient + email requis' });
-    const { derivSendWithdrawOtp } = require('./derivService');
-    const r = await derivSendWithdrawOtp(email, tokenClient);
-    res.json({ ok: r.ok });
+    const { tokenClient, montant } = req.body;
+    if (!tokenClient || !montant) return res.status(400).json({ error: 'tokenClient + montant requis' });
+    const { restSendWithdrawOtp } = require('./derivRest');
+    const r = await restSendWithdrawOtp(tokenClient, Number(montant), 'USD');
+    res.json({ ok: true, expires_at: r.expires_at, next_request_at: r.next_request_at });
   } catch(e) { res.status(400).json({ error: e.message }); }
 });
 router.post('/deriv-withdraw', async (req, res) => {
@@ -418,33 +418,57 @@ router.post('/deriv-withdraw', async (req, res) => {
     const { tokenClient, otp, montant, numero, operator, providerId = '' } = req.body;
     if (!tokenClient || !otp || !montant || !numero || !operator)
       return res.status(400).json({ error: 'champs requis manquants' });
-    const cfg = await require('./deriv').getDerivConfig();
-    const crAgent = cfg.deriv_cr_agent;
-    if (!crAgent) return res.status(500).json({ error: 'CR agent non configure' });
+    if (!/^[0-9]{6}$/.test(String(otp).trim()))
+      return res.status(400).json({ error: 'Code à 6 chiffres requis' });
+
     const { getRates } = require('./rate');
     const rates = await getRates();
     const rate = rates.rate_retrait;
     const montantUsd = Number(montant);
     const montantAr = Math.round(montantUsd * rate);
-    const { derivClientWithdraw } = require('./derivService');
-    const w = await derivClientWithdraw(tokenClient, crAgent, otp, montantUsd);
-    if (!w.ok) return res.status(400).json({ error: 'Deriv withdraw echec' });
-    const opKey = getOpKey(operator) || operator;
-    const template = await getUssdCode(operator, 'retrait');
-    const ussdCode = buildUssd(template, numero, montantAr);
+
+    // 1) Soumission du retrait Deriv (REST Payment Agent — token client OAuth, scope payment)
+    const { restSubmitWithdraw, restWithdrawStatus } = require('./derivRest');
+    const w = await restSubmitWithdraw(tokenClient, otp, montantUsd, 'USD');
+    let status = (w.status || '').toLowerCase();
+
+    if (status === 'rejected' || status === 'failed')
+      return res.status(400).json({ error: 'Retrait Deriv ' + status });
+
+    // 2) Court poll (~8s) pour capter une complétion rapide
+    for (let i = 0; i < 4 && status !== 'complete'; i++) {
+      await new Promise(r => setTimeout(r, 2000));
+      try {
+        const st = await restWithdrawStatus(tokenClient, w.request_id);
+        status = (st.status || '').toLowerCase();
+        if (status === 'rejected' || status === 'failed')
+          return res.status(400).json({ error: 'Retrait Deriv ' + status });
+      } catch (e) { /* on retente / on bascule en autoPoll */ }
+    }
+
+    const opKey     = getOpKey(operator) || operator;
+    const template  = await getUssdCode(operator, 'retrait');
+    const ussdCode  = buildUssd(template, numero, montantAr);
     const sessionId = genSession();
+
+    // Path A : complété → on paie tout de suite (status 'processing' = ignoré par autoPoll)
+    // Path B : encore pending → status 'pending' → autoPollRetraitsDeriv confirmera (statement agent) puis paiera
+    const confirmed = (status === 'complete');
     const retrait = new Retrait({
       operator: opKey, numero, montant: montantAr,
       type: 'retrait', ussdCode, sessionId,
       provider: 'Deriv', providerId,
       montantUsd, rate, devise: 'USD',
-      status: 'processing', receptionStatus: 'confirme',
-      response: 'Deriv withdraw OK: ' + (w.transaction_id || ''),
+      derivRequestId: w.request_id,
+      status: confirmed ? 'processing' : 'pending',
+      receptionStatus: confirmed ? 'confirme' : 'en_attente',
+      response: 'Deriv withdraw ' + status + (w.transaction_id ? (' #' + w.transaction_id) : ''),
       expiresAt: new Date(Date.now() + 60*60*1000)
     });
     await retrait.save();
-    dispatchUssdRetrait(retrait).catch(e => console.error('dispatchUssdRetrait (oauth):', e));
-    res.json({ ok: true, id: retrait._id, sessionId, montantAr });
+    if (confirmed) dispatchUssdRetrait(retrait).catch(e => console.error('dispatchUssdRetrait (oauth):', e));
+
+    res.json({ ok: true, id: retrait._id, sessionId, montantAr, status, pending: !confirmed });
   } catch(e) { res.status(400).json({ error: e.message }); }
 });
 module.exports = router;
