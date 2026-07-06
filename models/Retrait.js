@@ -15,6 +15,11 @@ const retraitSchema = new mongoose.Schema({
   devise:     { type: String, default: 'Ar' },
   provider:   { type: String, default: '' },
   providerId: { type: String, default: '' },
+  // REST Payment Agent API : request_id du retrait Deriv (suivi GET /withdraw/{id})
+  derivRequestId: { type: String, default: '', index: true },
+  // Clé d'idempotence (retry côté client-api — évite les doublons)
+  clientRef: { type: String, default: '', index: true },
+  derivTransactionId: { type: String, default: '' },
   response:  { type: String },
   // FIX: heure limite (createdAt + 1h) — raha tafahoatra io ary "processing"
   // mbola, dia automatic "failed". Calculée a la creation.

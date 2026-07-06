@@ -58,9 +58,16 @@ function buildUssd(template, numero, montant, numeroGateway) {
 // POST /api/retrait — créer un retrait
 router.post('/', auth, async (req, res) => {
   try {
-    const { operator, numero, montant, type='retrait', clientId='', provider='', providerId='' } = req.body;
+    const { operator, numero, montant, type='retrait', clientId='', provider='', providerId='', clientRef='' } = req.body;
     if (!operator||!numero||!montant)
       return res.status(400).json({ error: 'operator, numero, montant requis' });
+
+    // Idempotence : raha efa nisy ordre mitovy clientRef (retry client-api),
+    // averina ilay efa voaforona fa tsy mamorona vaovao (tsy doublon).
+    if (clientRef) {
+      const dup = await Retrait.findOne({ clientRef });
+      if (dup) return res.json({ ok: true, ussdCode: dup.ussdCode, channel: dup.channel, id: dup._id, sessionId: dup.sessionId, dedup: true });
+    }
 
     // === Conversion USD -> Ar (raha fournisseur Deriv) ===
     let montantUsd = 0, rate = 0, devise = 'Ar';
@@ -104,7 +111,7 @@ router.post('/', auth, async (req, res) => {
       operator: opKey,
       numero, montant: montantNum,
       type, ussdCode, channel, sessionId,
-      clientId, provider, providerId,
+      clientId, provider, providerId, clientRef,
       montantUsd, rate, devise,
       status: 'pending',
       expiresAt: new Date(Date.now() + 60*60*1000) // FIX: 1h limite de validite
@@ -403,55 +410,164 @@ async function autoPollRetraitsDeriv() {
 }
 setInterval(autoPollRetraitsDeriv, 30 * 1000);
 
-// NOUVEAU FLUX OTP EMAIL (sans OAuth, sans tokenClient)
-// Front mandefa: { email }  — backend mampiasa token agent
+/* ============================================================
+ * FLUX RETRAIT DERIV — REST Payment Agent API (officiel)
+ *   1. POST /deriv-otp      { tokenClient, montant }
+ *        -> Deriv mandefa code any amin'ny email/tel VOASORATRA
+ *           amin'ny compte client (tsy mila email param intsony)
+ *   2. POST /deriv-withdraw { tokenClient, otp, montant, numero, operator }
+ *        -> POST /withdraw (request_id) + poll fohy -> Mobile Money
+ * Ny token CLIENT (OAuth vitrine, scope `payment`) no ampiasaina
+ * amin'ireo appels roa ireo. Ny token AGENT dia ho an'ny /agents/me
+ * sy ny transfer (dépôt) ihany.
+ * ============================================================ */
+const crypto = require('crypto');
+// Map en mémoire requestId -> tokenClient (ho an'ny poller arrière-plan).
+// Very rehefa restart -> ny retrait dia mijanona 'pending' ary ny admin
+// afaka mi-valider manuel (na expire 1h). Tsy tehirizina anaty DB ny token.
+const derivTokenMap = new Map();
+
+function derivErrPayload(e) {
+  return { error: e.message, code: e.code || '', httpStatus: e.httpStatus || 0 };
+}
+
 router.post('/deriv-otp', async (req, res) => {
   try {
-    const { email, tokenClient } = req.body;
-    if (!email) return res.status(400).json({ error: 'email requis' });
+    const { tokenClient, montant } = req.body;
     if (!tokenClient) return res.status(400).json({ error: 'tokenClient requis' });
-    const { derivSendWithdrawOtp } = require('./derivService');
-    const r = await derivSendWithdrawOtp(email, tokenClient);
-    if (!r.ok) return res.status(400).json({ error: 'Deriv verify_email echec', raw: r.raw });
-    res.json({ ok: true });
-  } catch(e) { res.status(400).json({ error: e.message }); }
+    const montantUsd = Number(montant);
+    if (!montantUsd || montantUsd <= 0) return res.status(400).json({ error: 'montant (USD) requis' });
+
+    const { derivSendWithdrawOtpRest, derivGetAgentProfile, agentUsdLimits } = require('./derivService');
+
+    // Validation min/max mialoha (erreur mazava ho an'ny client)
+    try {
+      const profile = await derivGetAgentProfile();
+      const lim = agentUsdLimits(profile);
+      if (lim.min != null && montantUsd < lim.min)
+        return res.status(400).json({ error: `Montant minimum: ${lim.min} USD`, code: 'WithdrawalAmountMinimum' });
+      if (lim.max != null && montantUsd > lim.max)
+        return res.status(400).json({ error: `Montant maximum: ${lim.max} USD`, code: 'WithdrawalAmountMaximum' });
+    } catch (e) {
+      console.error('deriv-otp agent profile:', e.message); // tsy bloquant
+    }
+
+    const r = await derivSendWithdrawOtpRest(tokenClient, montantUsd);
+    // next_request_at / expires_at (epoch s) -> ho an'ny timer amin'ny front
+    res.json({ ok: true, message: r.message, next_request_at: r.next_request_at, expires_at: r.expires_at });
+  } catch(e) {
+    console.error('deriv-otp:', e.code || '', e.message);
+    res.status(e.httpStatus === 401 || e.httpStatus === 403 ? e.httpStatus : 400).json(derivErrPayload(e));
+  }
 });
+
 router.post('/deriv-withdraw', async (req, res) => {
   try {
-    // tokenClient TSY ILAINA intsony — agent token no ampiasaina (ao derivService)
     const { tokenClient, otp, montant, numero, operator, providerId = '' } = req.body;
     if (!tokenClient || !otp || !montant || !numero || !operator)
       return res.status(400).json({ error: 'champs requis manquants: tokenClient, otp, montant, numero, operator' });
-    const cfg = await require('./deriv').getDerivConfig();
-    const crAgent = cfg.deriv_cr_agent;
-    if (!crAgent) return res.status(500).json({ error: 'CR agent non configure (deriv_cr_agent)' });
+    if (!/^[0-9]{6}$/.test(String(otp)))
+      return res.status(400).json({ error: 'Code OTP invalide (6 chiffres)', code: 'VerificationCodeFormatInvalid' });
+
     const { getRates } = require('./rate');
     const rates = await getRates();
     const rate = rates.rate_retrait;
     const montantUsd = Number(montant);
     const montantAr = Math.round(montantUsd * rate);
-    const { derivClientWithdraw } = require('./derivService');
-    // derivClientWithdraw mampiasa token CLIENT (isaky ny retrait)
-    const w = await derivClientWithdraw(tokenClient, crAgent, otp, montantUsd);
-    if (!w.ok) return res.status(400).json({ error: 'Deriv withdraw echec', raw: w.raw });
+
+    const { derivClientWithdrawRest, derivWithdrawStatusRest } = require('./derivService');
+    const requestId = crypto.randomUUID();
+
+    // 1) Retrait Deriv (statut initial: pending)
+    const w = await derivClientWithdrawRest(tokenClient, otp, montantUsd, requestId);
+
+    // 2) Poll fohy synchrone (~15s max) — matetika complete haingana
+    let finalStatus = w.status, txId = w.transaction_id || '';
+    for (let i = 0; i < 5 && !['complete','rejected','failed'].includes(finalStatus); i++) {
+      await new Promise(r2 => setTimeout(r2, 3000));
+      try {
+        const st = await derivWithdrawStatusRest(tokenClient, requestId);
+        finalStatus = st.status; txId = st.transaction_id || txId;
+      } catch(e2) { console.error('deriv-withdraw poll:', e2.message); break; }
+    }
+    if (['rejected','failed'].includes(finalStatus)) {
+      return res.status(400).json({ error: 'Retrait Deriv ' + finalStatus, code: 'WithdrawalFailed', derivStatus: finalStatus });
+    }
+
+    // 3) Créer le retrait Mobile Money
     const opKey = getOpKey(operator) || operator;
     const template = await getUssdCode(operator, 'retrait');
     const ussdCode = buildUssd(template, numero, montantAr);
     const sessionId = genSession();
+    const confirmed = finalStatus === 'complete';
     const retrait = new Retrait({
       operator: opKey, numero, montant: montantAr,
       type: 'retrait', ussdCode, sessionId,
       provider: 'Deriv', providerId,
+      derivRequestId: requestId, derivTransactionId: txId ? String(txId) : '',
       montantUsd, rate, devise: 'USD',
-      status: 'processing', receptionStatus: 'confirme',
-      response: 'Deriv withdraw OK (OTP email): ' + (w.transaction_id || ''),
+      status: confirmed ? 'processing' : 'pending',
+      receptionStatus: confirmed ? 'confirme' : 'verification',
+      response: confirmed
+        ? ('Deriv withdraw complete (REST): tx ' + (txId || ''))
+        : ('Deriv withdraw pending (REST): ' + requestId),
       expiresAt: new Date(Date.now() + 60*60*1000)
     });
     await retrait.save();
-    dispatchUssdRetrait(retrait).catch(e => console.error('dispatchUssdRetrait (otp-email):', e));
-    res.json({ ok: true, id: retrait._id, sessionId, montantAr });
-  } catch(e) { res.status(400).json({ error: e.message }); }
+
+    if (confirmed) {
+      // Vola tafiditra amin'ny agent -> alefa avy hatrany ny Mobile Money
+      dispatchUssdRetrait(retrait).catch(e => console.error('dispatchUssdRetrait (deriv-rest):', e));
+    } else {
+      // Mbola pending any Deriv -> ny poller no manohy (token an-tsaina fotsiny)
+      derivTokenMap.set(requestId, tokenClient);
+    }
+
+    res.json({ ok: true, id: retrait._id, sessionId, montantAr, derivStatus: finalStatus, requestId });
+  } catch(e) {
+    console.error('deriv-withdraw:', e.code || '', e.message);
+    res.status(e.httpStatus === 401 || e.httpStatus === 403 ? e.httpStatus : 400).json(derivErrPayload(e));
+  }
 });
+
+// Poller REST : retraits Deriv mbola pending (manana derivRequestId)
+async function autoPollDerivRestWithdrawals() {
+  try {
+    const { derivWithdrawStatusRest } = require('./derivService');
+    const list = await Retrait.find({
+      type: 'retrait', status: 'pending',
+      provider: { $regex: /deriv/i },
+      derivRequestId: { $nin: [null, ''] }
+    }).lean();
+    for (const r of list) {
+      if (r.expiresAt && new Date(r.expiresAt) < new Date()) {
+        await Retrait.findByIdAndUpdate(r._id, { status: 'failed', response: 'Deriv timeout (retrait non complete)', updatedAt: new Date() });
+        derivTokenMap.delete(r.derivRequestId);
+        continue;
+      }
+      const tok = derivTokenMap.get(r.derivRequestId);
+      if (!tok) continue; // token very (restart) -> validation manuelle admin
+      try {
+        const st = await derivWithdrawStatusRest(tok, r.derivRequestId);
+        if (st.status === 'complete') {
+          await Retrait.findByIdAndUpdate(r._id, {
+            status: 'processing', receptionStatus: 'confirme',
+            derivTransactionId: st.transaction_id ? String(st.transaction_id) : '',
+            response: 'Deriv withdraw complete (REST poll): tx ' + (st.transaction_id || ''),
+            updatedAt: new Date()
+          });
+          derivTokenMap.delete(r.derivRequestId);
+          const full = await Retrait.findById(r._id);
+          dispatchUssdRetrait(full).catch(e => console.error('dispatchUssdRetrait (deriv-rest poll):', e));
+        } else if (['rejected','failed'].includes(st.status)) {
+          await Retrait.findByIdAndUpdate(r._id, { status: 'failed', response: 'Deriv withdraw ' + st.status, updatedAt: new Date() });
+          derivTokenMap.delete(r.derivRequestId);
+        }
+      } catch(e) { console.error('autoPollDerivRestWithdrawals:', r.derivRequestId, e.message); }
+    }
+  } catch(e) { console.error('autoPollDerivRestWithdrawals:', e.message); }
+}
+setInterval(autoPollDerivRestWithdrawals, 20 * 1000);
 module.exports = router;
 
 // POST /api/retrait/:id/valider — bouton VALIDÉ amin'ny admin panel
