@@ -18,6 +18,8 @@ const retraitSchema = new mongoose.Schema({
   // famoronana, mba ho azo amin'ny relance/retry foana ny CR marina.
   providerId: { type: String, default: '' },
   derivRequestId: { type: String, default: '', index: true },
+  // Cle d'idempotence (retry cote client-api - evite les doublons)
+  clientRef: { type: String, default: '', index: true },
   // FIX: ID transaction nampodin'i Deriv rehefa vita ny transfer -- saha MIAVAKA
   // amin'ny providerId (CR), tsy mifangaro intsony.
   derivTxnId: { type: String, default: '' },

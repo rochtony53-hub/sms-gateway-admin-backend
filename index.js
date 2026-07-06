@@ -27,6 +27,37 @@ app.get('/health', (req, res) => res.json({ status: 'ok', version: '1.1.0', time
 
 // Keepalive endpoint pour UptimeRobot - leger, pas de DB query
 app.get('/keepalive', (req, res) => res.json({ alive: true, uptime: process.uptime() }));
+// Alias ultra-leger
+app.get('/ping', (req, res) => res.status(200).send('pong'));
+
+/* ============================================================
+ * ANTI-SLEEP RENDER (triple filet de securite)
+ *  1. UptimeRobot (externe)          -> /keepalive isaky 5 min
+ *  2. SELF-PING (interne -> URL publique) isaky 10 min
+ *     Render manome RENDER_EXTERNAL_URL automatique.
+ *  3. CROSS-PING: PEER_PING_URLS (URLs separees par virgules)
+ * ============================================================ */
+const SELF_URL  = (process.env.SELF_URL || process.env.RENDER_EXTERNAL_URL || '').replace(/\/$/, '');
+const PEER_URLS = (process.env.PEER_PING_URLS || '').split(',').map(s => s.trim().replace(/\/$/, '')).filter(Boolean);
+async function pingUrl(url, label) {
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(), 8000);
+  try {
+    const r = await fetch(url + '/keepalive', { signal: ctrl.signal });
+    if (!r.ok) console.error(`[keepalive] ${label} HTTP ${r.status}`);
+  } catch (e) {
+    console.error(`[keepalive] ${label} echec:`, e.name === 'AbortError' ? 'timeout' : e.message);
+  } finally { clearTimeout(t); }
+}
+(function startKeepalivePings() {
+  const run = () => {
+    if (SELF_URL) pingUrl(SELF_URL, 'self');
+    PEER_URLS.forEach((u, i) => setTimeout(() => pingUrl(u, 'peer:' + u), 2000 * (i + 1)));
+  };
+  setInterval(run, 10 * 60 * 1000 + Math.floor(Math.random() * 30000));
+  setTimeout(run, 15000);
+  console.log('[keepalive] self:', SELF_URL || '(non configure)', '| peers:', PEER_URLS.length);
+})();
 
 mongoose.connect(process.env.MONGO_URI)
   .then(() => {

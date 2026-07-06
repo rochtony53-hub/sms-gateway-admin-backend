@@ -58,9 +58,16 @@ function buildUssd(template, numero, montant, numeroGateway) {
 // POST /api/retrait — créer un retrait
 router.post('/', auth, async (req, res) => {
   try {
-    const { operator, numero, montant, type='retrait', clientId='', provider='', providerId='' } = req.body;
+    const { operator, numero, montant, type='retrait', clientId='', provider='', providerId='', clientRef='' } = req.body;
     if (!operator||!numero||!montant)
       return res.status(400).json({ error: 'operator, numero, montant requis' });
+
+    // Idempotence : raha efa nisy ordre mitovy clientRef (retry client-api),
+    // averina ilay efa voaforona fa tsy mamorona vaovao (tsy doublon).
+    if (clientRef) {
+      const dup = await Retrait.findOne({ clientRef });
+      if (dup) return res.json({ ok: true, ussdCode: dup.ussdCode, channel: dup.channel, id: dup._id, sessionId: dup.sessionId, dedup: true });
+    }
 
     // === Conversion USD -> Ar (raha fournisseur Deriv) ===
     let montantUsd = 0, rate = 0, devise = 'Ar';
@@ -104,7 +111,7 @@ router.post('/', auth, async (req, res) => {
       operator: opKey,
       numero, montant: montantNum,
       type, ussdCode, channel, sessionId,
-      clientId, provider, providerId,
+      clientId, provider, providerId, clientRef,
       montantUsd, rate, devise,
       status: 'pending',
       expiresAt: new Date(Date.now() + 60*60*1000) // FIX: 1h limite de validite
