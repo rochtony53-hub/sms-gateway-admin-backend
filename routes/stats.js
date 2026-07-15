@@ -33,13 +33,19 @@ router.get('/dashboard', auth, async (req, res) => {
     const ussdCheckEnabled = onlineDevices.some(d => d.ussdCheckEnabled);
 
     // Build balances object — mihazo montant (verified) raha ON, montantOff raha OFF
-    const balances = { orange: 0, mvola: 0, airtel: 0 };
-    const balancesVerified = { orange: null, mvola: null, airtel: null };
+    const balances = { orange: 0, mvola: 0, airtel: 0, mvola_km: 0 };
+    const balancesVerified = { orange: null, mvola: null, airtel: null, mvola_km: null };
     soldes.forEach(s => {
-      const key = (s.operator === 'mvola' || s.operator === 'yas') ? 'mvola' : s.operator;
+      // Comores (Fc) mitokana ; MG (Ar): yas/telma -> mvola
+      let key;
+      if (s.operator === 'mvola_km' || s.operator === 'telma_km' || s.operator === 'comores') key = 'mvola_km';
+      else if (s.operator === 'mvola' || s.operator === 'yas') key = 'mvola';
+      else key = s.operator;
+      if (!(key in balances)) return; // ops tsy fantatra: tsy raisina
       balances[key] = ussdCheckEnabled ? (s.montant || 0) : (s.montantOff || 0);
       balancesVerified[key] = ussdCheckEnabled ? (s.baseTimestamp || null) : null;
     });
+    // Total = Ariary IHANY (mvola_km en Fc tsy tafiditra amin'ny total Ar)
     const total = balances.orange + balances.mvola + balances.airtel;
 
     const devNow = Date.now();
