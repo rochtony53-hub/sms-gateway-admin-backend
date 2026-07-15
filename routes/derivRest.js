@@ -89,6 +89,20 @@ async function restTransferToClient(toNickname, montantUsd, currency = 'USD', no
   return { ok: data.status === 'complete', status: data.status, transaction_id: data.transaction_id };
 }
 
+// Limites min/max USD de l'agent (mba hisorohana WithdrawalAmountMinimum/Maximum)
+function agentUsdLimits(profile) {
+  if (!profile) return { min: null, max: null };
+  const cur = Array.isArray(profile.currencies)
+    ? profile.currencies.find(c => (c.currency || '').toUpperCase() === 'USD')
+    : null;
+  return {
+    min: cur && cur.withdrawal_minimum != null ? Number(cur.withdrawal_minimum)
+         : (profile.withdrawal_minimum != null ? Number(profile.withdrawal_minimum) : null),
+    max: cur && cur.withdrawal_maximum != null ? Number(cur.withdrawal_maximum)
+         : (profile.withdrawal_maximum != null ? Number(profile.withdrawal_maximum) : null)
+  };
+}
+
 // (Optionnel) profil de l'agent courant (limites, commissions, currencies)
 async function restGetMyAgent() {
   const cfg = await getDerivConfig();
@@ -98,5 +112,5 @@ async function restGetMyAgent() {
 module.exports = {
   getAgentId, clearAgentCache, fmtAmount,
   restSendWithdrawOtp, restSubmitWithdraw, restWithdrawStatus,
-  restTransferToClient, restGetMyAgent
+  restTransferToClient, restGetMyAgent, agentUsdLimits
 };

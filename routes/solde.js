@@ -5,6 +5,7 @@ const Solde   = require('../models/Solde');
 
 function getOpKey(operator) {
   const o = (operator || '').toLowerCase();
+  if (o.includes('comor') || o.includes('mvola_km') || o.includes('telma_km')) return 'mvola_km';
   if (o.includes('orange')) return 'orange';
   if (o.includes('yas') || o.includes('telma') || o.includes('mvola')) return 'mvola';
   if (o.includes('airtel')) return 'airtel';
@@ -18,7 +19,7 @@ function extractAmount(text) {
   if (!text) return null;
 
   // Cherche le montant avant "Ar" ou "ariary" en priorité
-  const arPattern = /(\d[\d\s.,]*)\s*(?:Ar|ariary)/gi;
+  const arPattern = /(\d[\d\s.,]*)\s*(?:Ar|ariary|Fc|kmf)/gi;
   const arMatches = [...text.matchAll(arPattern)];
   if (arMatches.length > 0) {
     for (const m of arMatches) {
@@ -72,6 +73,44 @@ router.post('/check-result', apikey, async (req, res) => {
       return res.status(400).json({ error: "Impossible d'extraire le montant", raw: ussdResponse });
 
     const baseTimestamp = timestamp ? new Date(timestamp) : new Date();
+
+    // ===== ALERTE "vola tonga nefa tsy nisy SMS" =====
+    // Raha niakatra ny solde marina (delta > 0) ary misy ordre DEPOT
+    // pending/processing tsy mbola nahazo SMS izay mifanandrify amin'ny
+    // delta (tolerance +10%) -> mamorona alerte admin (Verifier/Valider/Refuser).
+    try {
+      const prev = await Solde.findOne({ operator: opKey }).lean();
+      const soldeAvant = prev ? (Number(prev.montant) || 0) : 0;
+      const delta = amount - soldeAvant;
+      if (delta > 0) {
+        const Retrait = require('../models/Retrait');
+        const Alert = require('../models/Alert');
+        const oneHourAgo = new Date(Date.now() - 60*60*1000);
+        const candidats = await Retrait.find({
+          type: 'depot', operator: opKey,
+          status: { $in: ['pending','processing'] },
+          receptionStatus: { $ne: 'confirme' },
+          createdAt: { $gte: oneHourAgo },
+          $or: [ { lastUssdResponse: { $in: [null, ''] } }, { lastUssdResponse: { $exists: false } } ]
+        }).sort({ createdAt: 1 }).lean();
+        for (const c of candidats) {
+          const mOrd = Math.round(c.montant);
+          if (delta >= mOrd && delta <= Math.round(mOrd * 1.10)) {
+            const deja = await Alert.findOne({ retraitId: c._id, status: 'pending' });
+            if (!deja) {
+              await Alert.create({
+                type: 'depot_sans_sms', retraitId: c._id, operator: opKey,
+                montantAttendu: mOrd, montantRecu: delta,
+                soldeAvant, soldeApres: amount,
+                detail: 'Solde gateway +' + delta + ' (check USSD) nefa tsy nisy SMS ho an\'ity ordre ity'
+              });
+              console.log('[ALERTE] depot sans SMS:', String(c._id), 'delta', delta);
+            }
+            break; // ordre iray ihany isaky ny delta
+          }
+        }
+      }
+    } catch(eA) { console.error('alerte depot_sans_sms:', eA.message); }
 
     await Solde.findOneAndUpdate(
       { operator: opKey },

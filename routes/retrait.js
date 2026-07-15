@@ -10,11 +10,13 @@ const { getRates } = require('./rate');
 const DEFAULTS = {
   orange: { gp_depot:'', gp_retrait:'', tpe_depot:'', tpe_retrait:'' },
   mvola:  { gp_depot:'', gp_retrait:'', tpe_depot:'', tpe_retrait:'' },
+  mvola_km: { gp_depot:'', gp_retrait:'', tpe_depot:'', tpe_retrait:'' },
   airtel: { gp_depot:'', gp_retrait:'', tpe_depot:'', tpe_retrait:'' },
 };
 
 function getOpKey(op) {
   const o = (op||'').toLowerCase();
+    if (o.includes('comor') || o.includes('mvola_km') || o.includes('telma_km')) return 'mvola_km';
   if (o.includes('orange')) return 'orange';
   if (o.includes('yas')||o.includes('telma')||o.includes('mvola')) return 'mvola';
   if (o.includes('airtel')) return 'airtel';
@@ -61,6 +63,10 @@ router.post('/', auth, async (req, res) => {
     const { operator, numero, montant, type='retrait', clientId='', provider='', providerId='', clientRef='' } = req.body;
     if (!operator||!numero||!montant)
       return res.status(400).json({ error: 'operator, numero, montant requis' });
+    // VIRGULE: "1,50" -> 1.50 (saisie FR mahazatra)
+    const montantSaisi = Number(String(montant).replace(/\s/g,'').replace(',','.'));
+    if (!montantSaisi || montantSaisi <= 0)
+      return res.status(400).json({ error: 'montant invalide' });
 
     // Idempotence : raha efa nisy ordre mitovy clientRef (retry client-api),
     // averina ilay efa voaforona fa tsy mamorona vaovao (tsy doublon).
@@ -69,13 +75,19 @@ router.post('/', auth, async (req, res) => {
       if (dup) return res.json({ ok: true, ussdCode: dup.ussdCode, channel: dup.channel, id: dup._id, sessionId: dup.sessionId, dedup: true });
     }
 
-    // === Conversion USD -> Ar (raha fournisseur Deriv) ===
-    let montantUsd = 0, rate = 0, devise = 'Ar';
-    let montantFinal = Number(montant);
+    // === Conversion USD -> Ar/Fc (raha fournisseur Deriv) ===
+    // Comores (mvola_km): cours manokana (1 USD = ? Fc) + devise Fc
+    const isKm = getOpKey(operator) === 'mvola_km';
+    let montantUsd = 0, rate = 0, devise = isKm ? 'Fc' : 'Ar';
+    let montantFinal = montantSaisi;
     if (provider && provider.toLowerCase() === 'deriv') {
       const rates = await getRates();
-      rate = (type === 'depot') ? rates.rate_depot : rates.rate_retrait;
-      montantUsd = Number(montant);
+      rate = (type === 'depot')
+        ? (isKm ? rates.rate_depot_km : rates.rate_depot)
+        : (isKm ? rates.rate_retrait_km : rates.rate_retrait);
+      if (isKm && !rate)
+        return res.status(400).json({ error: 'Cours Comores (Fc) non configuré — voir Paramètres admin' });
+      montantUsd = montantSaisi;
       montantFinal = Math.round(montantUsd * rate);
       devise = 'USD';
     }
@@ -117,6 +129,36 @@ router.post('/', auth, async (req, res) => {
       expiresAt: new Date(Date.now() + 60*60*1000) // FIX: 1h limite de validite
     });
     await retrait.save();
+
+    // ===== FENETRE 1h: vola nalefa MIALOHA ny ordre =====
+    // Raha nisy SMS "matched" (template OK fa tsy nisy ordre tamin'izay) tao
+    // anatin'ny 1 ora farany, mitovy numero mpandefa sy montant (tolerance
+    // +10%), dia avy hatrany no manamarina ity ordre depot ity.
+    if (type === 'depot') {
+      (async () => {
+        try {
+          const smsMod = require('./sms');
+          const Sms = require('../models/Sms');
+          const oneHourAgo = new Date(Date.now() - 60*60*1000);
+          const orphans = await Sms.find({
+            status: 'matched',
+            $or: [ { retraitId: null }, { retraitId: { $exists: false } } ],
+            receivedAt: { $gte: oneHourAgo }
+          }).sort({ receivedAt: -1 }).limit(20).lean();
+          for (const sm of orphans) {
+            if (smsMod.getOpKeySms(sm.operator) !== opKey) continue;
+            const numSms = smsMod.extractNumeroFromSms(sm.message);
+            if (numSms && numSms !== numero) continue;
+            const mSms = smsMod.parseMontant(sm.message);
+            if (mSms == null) continue;
+            if (!smsMod.montantDepotOk("depot", mSms, montantFinal)) continue;
+            console.log('[FENETRE 1h] SMS kamboty mifanandrify -> validation ordre', String(retrait._id));
+            await smsMod.autoValidate(sm.operator, sm.message, sm._id);
+            break;
+          }
+        } catch(eW) { console.error('fenetre 1h:', eW.message); }
+      })();
+    }
 
     // FIX: RETRAIT = serveur mandefa command USSD any amin'ny APK gateway
     // (server-side automatique, tsy webview/client). DEPOT = client mandefa
@@ -242,9 +284,14 @@ router.post('/public/:id/processing', async (req, res) => {
 function operatorNameToKeyword(opKey) {
   if (opKey === 'orange') return 'Orange';
   if (opKey === 'mvola')  return 'MVola';
+  if (opKey === 'mvola_km') return 'MVola'; // SIM Telma Comores dia "Telma/MVola" ihany
   if (opKey === 'airtel') return 'Airtel';
   return null;
 }
+
+// Appareil COMORES = deviceId misy "KM" na "COMOR" (apetraky ny admin ao
+// amin'ny APK). Izay no manavaka azy amin'ny appareil Madagasikara.
+const KM_DEVICE_REGEX = /(km|comor)/i;
 
 async function dispatchUssdRetrait(retrait) {
   try {
@@ -266,10 +313,14 @@ async function dispatchUssdRetrait(retrait) {
 
     // Mitady appareil ONLINE izay manana SIM mifanaraka (sims contient le keyword)
     const Device = require('../models/Device');
-    const devices = await Device.find({
+    let devices = await Device.find({
       online: true,
       sims: { $regex: keyword, $options: 'i' }
     }).sort({ lastSeen: -1 });
+    // Comores: appareil KM ihany ; Madagasikara: esorina ny appareil KM
+    devices = devices.filter(dv => (opKey === 'mvola_km')
+      ? KM_DEVICE_REGEX.test(dv.deviceId || '')
+      : !KM_DEVICE_REGEX.test(dv.deviceId || ''));
 
     if (!devices.length) {
       console.error('dispatchUssdRetrait: aucun appareil online pour', opKey);
@@ -411,14 +462,86 @@ async function autoPollRetraitsDeriv() {
 setInterval(autoPollRetraitsDeriv, 30 * 1000);
 
 // RETRAIT OAuth Deriv
+/* ============================================================
+ * FLUX BETWINNER (Cashdesk API) — tsotra: tsy misy OAuth/OTP email
+ *   Retrait: client manome ID + code (4 car.) -> Payout -> ny montant
+ *   dia avy amin'ny reponse (summa, Ariary/Fc direct) -> Mobile Money.
+ * ============================================================ */
+// POST /api/retrait/betwinner-user  { userId } -> validation ID + anaran'ny joueur
+router.post('/betwinner-user', async (req, res) => {
+  try {
+    const { userId } = req.body;
+    if (!userId || !/^[0-9]+$/.test(String(userId).trim()))
+      return res.status(400).json({ error: 'ID Betwinner invalide (chiffres uniquement)' });
+    const { betwinnerFindUser } = require('./betwinnerService');
+    const u = await betwinnerFindUser(String(userId).trim());
+    res.json({ ok: true, userId: u.userId, name: u.name, currencyId: u.currencyId });
+  } catch(e) {
+    console.error('betwinner-user:', e.code || '', e.message);
+    res.status(400).json({ error: e.message, code: e.code || '' });
+  }
+});
+
+// POST /api/retrait/betwinner-withdraw  { userId, code, numero, operator }
+// Payout aloha (mahazo ny montant avy amin'ny summa) -> Retrait Mobile Money
+router.post('/betwinner-withdraw', async (req, res) => {
+  try {
+    const { userId, code, numero, operator } = req.body;
+    if (!userId || !code || !numero || !operator)
+      return res.status(400).json({ error: 'champs requis: userId, code, numero, operator' });
+    if (!/^[0-9]+$/.test(String(userId).trim()))
+      return res.status(400).json({ error: 'ID Betwinner invalide' });
+    const codeStr = String(code).trim();
+    if (codeStr.length < 3 || codeStr.length > 12)
+      return res.status(400).json({ error: 'Code Betwinner invalide' });
+
+    const { betwinnerPayout } = require('./betwinnerService');
+    // 1) Payout Betwinner — raha mahomby dia azo ny montant
+    const p = await betwinnerPayout(String(userId).trim(), codeStr);
+    const montantAr = Math.round(p.summa);
+
+    // 2) Retrait Mobile Money (vola efa tafiditra amin'ny caisse -> alefa avy hatrany)
+    const opKey = getOpKey(operator) || operator;
+    const template = await getUssdCode(operator, 'retrait');
+    const ussdCode = buildUssd(template, numero, montantAr);
+    const sessionId = genSession();
+    const retrait = new Retrait({
+      operator: opKey, numero, montant: montantAr,
+      type: 'retrait', ussdCode, sessionId,
+      provider: 'Betwinner', providerId: String(userId).trim(),
+      montantUsd: 0, rate: 0, devise: (opKey === 'mvola_km' ? 'Fc' : 'Ar'),
+      status: 'processing', receptionStatus: 'confirme',
+      response: 'Betwinner payout OK (code ' + codeStr.slice(0,2) + '**): ' + montantAr,
+      expiresAt: new Date(Date.now() + 60*60*1000)
+    });
+    await retrait.save();
+    dispatchUssdRetrait(retrait).catch(e2 => console.error('dispatchUssdRetrait (betwinner):', e2));
+
+    res.json({ ok: true, id: retrait._id, sessionId, montantAr });
+  } catch(e) {
+    console.error('betwinner-withdraw:', e.code || '', e.message);
+    res.status(400).json({ error: e.message, code: e.code || '' });
+  }
+});
+
 router.post('/deriv-otp', async (req, res) => {
   try {
     const { tokenClient, montant } = req.body;
     if (!tokenClient || !montant) return res.status(400).json({ error: 'tokenClient + montant requis' });
-    const { restSendWithdrawOtp } = require('./derivRest');
-    const r = await restSendWithdrawOtp(tokenClient, Number(montant), 'USD');
+    const montantUsd = Number(montant);
+    if (!montantUsd || montantUsd <= 0) return res.status(400).json({ error: 'montant (USD) requis' });
+    const { restSendWithdrawOtp, restGetMyAgent, agentUsdLimits } = require('./derivRest');
+    // Validation min/max mialoha (hafatra mazava ho an'ny client fa tsy erreur Deriv miafina)
+    try {
+      const lim = agentUsdLimits(await restGetMyAgent());
+      if (lim.min != null && montantUsd < lim.min)
+        return res.status(400).json({ error: 'Montant minimum: ' + lim.min + ' USD', code: 'WithdrawalAmountMinimum' });
+      if (lim.max != null && montantUsd > lim.max)
+        return res.status(400).json({ error: 'Montant maximum: ' + lim.max + ' USD', code: 'WithdrawalAmountMaximum' });
+    } catch (eLim) { console.error('deriv-otp limites agent (non bloquant):', eLim.message); }
+    const r = await restSendWithdrawOtp(tokenClient, montantUsd, 'USD');
     res.json({ ok: true, expires_at: r.expires_at, next_request_at: r.next_request_at });
-  } catch(e) { res.status(400).json({ error: e.message }); }
+  } catch(e) { res.status(e.httpStatus === 401 || e.httpStatus === 403 ? e.httpStatus : 400).json({ error: e.message, code: e.code || '' }); }
 });
 router.post('/deriv-withdraw', async (req, res) => {
   try {
@@ -430,7 +553,8 @@ router.post('/deriv-withdraw', async (req, res) => {
 
     const { getRates } = require('./rate');
     const rates = await getRates();
-    const rate = rates.rate_retrait;
+    const _isKmWd = getOpKey(operator) === 'mvola_km';
+    const rate = _isKmWd ? rates.rate_retrait_km : rates.rate_retrait;
     const montantUsd = Number(montant);
     const montantAr = Math.round(montantUsd * rate);
 

@@ -10,6 +10,7 @@ const Solde       = require('../models/Solde');
 
 function getOpKey(op) {
   const o = (op||'').toLowerCase();
+  if (o.includes('comor') || o.includes('mvola_km') || o.includes('telma_km')) return 'mvola_km';
   if (o.includes('orange')) return 'orange';
   if (o.includes('yas')||o.includes('telma')||o.includes('mvola')) return 'mvola';
   if (o.includes('airtel')) return 'airtel';
@@ -36,12 +37,21 @@ async function checkTemplate(opKey, message) {
   return false;
 }
 
+// TOLERANCE: depot -> montant <= recu <= montant*1.10 ; retrait -> egalite stricte
+function montantDepotOk(type, montantSms, montantOrdre) {
+  const mOrd = Math.round(Number(montantOrdre)), mSms = Math.round(Number(montantSms));
+  if (!mOrd || isNaN(mSms)) return false;
+  return (type === 'depot')
+    ? (mSms >= mOrd && mSms <= Math.round(mOrd * 1.10))
+    : (mSms === mOrd);
+}
+
 // Maka ny MONTANT TRANSACTION (montant voalohany), TSY ny solde
 function parseMontant(message) {
   const msg = (message || '');
   const cut = msg.replace(/(nouveau\s+)?solde[^.]*\.?/ig,' ').replace(/balance[^.]*\.?/ig,' ');
-  let m = cut.match(/(?:ar|mga)\s*([0-9][0-9\s.,]*)/i)
-        || cut.match(/([0-9][0-9\s.,]*?)\s*(?:ar|mga)/i);
+  let m = cut.match(/(?:ar|mga|fc|kmf)\s*([0-9][0-9\s.,]*)/i)
+        || cut.match(/([0-9][0-9\s.,]*?)\s*(?:ar|mga|fc|kmf)/i);
   if (!m) return null;
   const val = parseFloat(m[1].replace(/[\s,]/g,''));
   return (isNaN(val)) ? null : val;
@@ -133,8 +143,13 @@ async function autoValidate(operator, message, smsId) {
     return;
   }
 
-  if (Math.round(montantSms) !== Math.round(retrait.montant)) {
-    // FIX: receptionStatus = rejete (montant diso)
+  // TOLERANCE DEPOT +10% : ny client indraindray mandefa mihoatra kely.
+  //   depot  : montant <= recu <= montant*1.10 -> OK ; recu < montant -> REFUSE ;
+  //            recu > +10% -> refuse (tsy an'io ordre io angamba)
+  //   retrait: egalite stricte (toy ny teo aloha)
+  const mSms = Math.round(montantSms);
+  if (!montantDepotOk(type, montantSms, retrait.montant)) {
+    // FIX: receptionStatus = rejete (montant diso / tsy ampy / mihoatra be)
     await Retrait.findByIdAndUpdate(retrait._id, {
       status: 'failed', receptionStatus: 'rejete', lastUssdResponse: message, updatedAt: new Date()
     });
@@ -189,17 +204,31 @@ async function autoValidate(operator, message, smsId) {
     return;
   }
 
-  // DEPOT : vola voaray (solde miakatra). FA status tsy 'success' raha tsy VOARAY ny Deriv.
+  // DEPOT : vola voaray (solde miakatra amin'ny VOLA TENA VOARAY — tolerance +10%).
+  const montantRecu = (typeof mSms === 'number' && mSms) ? mSms : Math.round(claimed.montant);
   await Solde.findOneAndUpdate(
     { operator: opKey },
-    { $inc: { montant: claimed.montant, montantOff: claimed.montant }, updatedAt: new Date() },
+    { $inc: { montant: montantRecu, montantOff: montantRecu }, updatedAt: new Date() },
     { upsert: true }
   );
 
   let depotStatus = 'processing';
   let derivErr = '';
   let derivTxnId = '';
-  if (claimed.providerId) {
+  const isBetwinnerDepot = /betwinner/i.test(claimed.provider || '');
+  if (claimed.providerId && isBetwinnerDepot) {
+    // BETWINNER: credit joueur — montant ARIARY/Fc DIRECT (tsy misy cours)
+    try {
+      const { betwinnerDeposit } = require('./betwinnerService');
+      const b = await betwinnerDeposit(claimed.providerId, claimed.montant);
+      if (b && b.ok) depotStatus = 'success';
+      else { depotStatus = 'processing'; derivErr = 'Betwinner: reponse non confirmee'; }
+    } catch(e) {
+      console.error('betwinnerDeposit error pour depot', claimed._id, ':', e.message);
+      depotStatus = 'processing';
+      derivErr = e.message;
+    }
+  } else if (claimed.providerId) {
     try {
       const { derivTransferToClient } = require('./derivService');
       const r = await derivTransferToClient(claimed.providerId, claimed.montantUsd || claimed.montant);
@@ -240,9 +269,12 @@ router.post('/receive', apikey, async (req, res) => {
   try {
     const { from, message, sim, simSlot, deviceId, operator: opBody } = req.body;
     let operator = opBody || 'Inconnu';
-    if (!opBody && sim) {
+    // Appareil COMORES (deviceId misy KM/COMOR) -> operator Comores foana
+    if (!opBody && deviceId && /(km|comor)/i.test(deviceId)) operator = 'MVola Comores';
+    else if (!opBody && sim) {
       const s = sim.toUpperCase();
-      if (s.includes('ORANGE')) operator = 'Orange Money';
+      if (s.includes('COMOR')) operator = 'MVola Comores';
+      else if (s.includes('ORANGE')) operator = 'Orange Money';
       else if (s.includes('YAS') || s.includes('TELMA') || s.includes('MVOLA')) operator = 'YAS (Telma)';
       else if (s.includes('AIRTEL')) operator = 'Airtel Money';
     }
@@ -383,6 +415,26 @@ async function autoRelanceDepotsDeriv() {
       if (!claimed) continue;
 
       try {
+        // BETWINNER: relance voafetra 3 (tsy misy verification statement any
+        // aminy — fadiana ny double-credit raha timeout nefa lany ihany)
+        if (/betwinner/i.test(claimed.provider || '')) {
+          if ((d.relanceCount || 0) >= 3) {
+            await Retrait.findByIdAndUpdate(claimed._id, {
+              response: 'Relance Betwinner voafetra (3) — validation manuelle ilaina',
+              locked: false, updatedAt: new Date()
+            });
+            continue;
+          }
+          const { betwinnerDeposit } = require('./betwinnerService');
+          const b = await betwinnerDeposit(claimed.providerId, claimed.montant);
+          await Retrait.findByIdAndUpdate(claimed._id, {
+            status: (b && b.ok) ? 'success' : 'processing',
+            response: (b && b.ok) ? '' : 'Betwinner: reponse non confirmee',
+            relanceCount: (d.relanceCount||0)+1, lastRelanceAt: new Date(),
+            locked: false, updatedAt: new Date()
+          });
+          continue;
+        }
         const { derivTransferToClient, derivCheckTransferSent } = require('./derivService');
 
         // FIX: "RETOUR" Deriv -- mizaha ALOHA raha efa lasa tena izy ilay
@@ -441,3 +493,10 @@ async function autoRelanceDepotsDeriv() {
 // FIX: isaky 15 minitra ny relance depot (araka ny voafaritra), tsy 5mn intsony.
 setInterval(autoRelanceDepotsDeriv, 15 * 60 * 1000);
 module.exports = router;
+// Exports ho an'ny fenetre 1h (ordre aorian'ny vola): retrait.js mampiasa
+module.exports.autoValidate = autoValidate;
+module.exports.extractNumeroFromSms = extractNumeroFromSms;
+module.exports.parseMontant = parseMontant;
+module.exports.getOpKeySms = getOpKey;
+module.exports.montantDepotOk = montantDepotOk;
+

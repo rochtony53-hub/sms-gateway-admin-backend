@@ -14,6 +14,8 @@ const DEFAULTS = [
     gp_retrait:'#111*1*2*{numero}*{montant}*2*1#',
     tpe_depot:'#111*1*2*{numero}*{montant}*2#',
     tpe_retrait:'#111*1*2*{numero}*{montant}*2*1#' },
+  { operator:'mvola_km',
+    gp_depot:'', gp_retrait:'', tpe_depot:'', tpe_retrait:'' },
   { operator:'airtel',
     gp_depot:'*123*2*{numero}*{montant}#',
     gp_retrait:'*123*1*{numero}*{montant}#',
@@ -78,6 +80,7 @@ router.post('/build', apikey, async (req, res) => {
 
     const opKey = operator.toLowerCase()
       .replace('orange money','orange')
+      .replace('mvola comores','mvola_km').replace('telma comores','mvola_km').replace('mvola_km','mvola_km')
       .replace('yas (telma)','mvola').replace('mvola','mvola').replace('telma','mvola')
       .replace('airtel money','airtel');
 
