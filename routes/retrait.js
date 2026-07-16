@@ -228,6 +228,38 @@ router.patch('/:id/status', auth, async (req, res) => {
 });
 
 
+// GET /api/retrait/deriv-diag — DIAGNOSTIC connexion agent Deriv (admin).
+// Vérifie : config, agent_id (GET /agents/me), limites min/max USD. Sert à
+// valider que le retrait FONCTIONNERA avant tout retrait client réel.
+router.get('/deriv-diag', auth, async (req, res) => {
+  const out = { config: {}, agent: null, limits: null, ok: false };
+  try {
+    const { getDerivConfig } = require('./deriv');
+    const { getAgentId, restGetMyAgent, agentUsdLimits, clearAgentCache } = require('./derivRest');
+    const cfg = await getDerivConfig();
+    out.config = {
+      app_id: cfg.deriv_app_id ? 'OK' : 'MANQUANT',
+      token: cfg.deriv_token ? ('OK (' + String(cfg.deriv_token).slice(0, 4) + '…)') : 'MANQUANT',
+      agent_id_manuel: cfg.deriv_agent_id || '(auto)'
+    };
+    if (!cfg.deriv_app_id || !cfg.deriv_token) {
+      out.error = 'App ID ou Token Deriv manquant (Réglages admin).';
+      return res.status(400).json(out);
+    }
+    clearAgentCache();
+    const profile = await restGetMyAgent();
+    out.agent = { id: (profile && profile.id) || null, name: (profile && (profile.name || profile.paymentagent_name)) || '', currencies: (profile && profile.currencies) ? profile.currencies.map(c => c.currency) : [] };
+    out.limits = agentUsdLimits(profile);
+    if (!out.agent.id) { out.error = "agent_id introuvable — ce compte n'est peut-être pas Payment Agent, ou le token n'a pas le scope 'payment'."; return res.status(400).json(out); }
+    out.ok = true;
+    res.json(out);
+  } catch (e) {
+    out.error = derivErrMsg(e);
+    out.code = e.code || '';
+    res.status(e.httpStatus === 401 || e.httpStatus === 403 ? e.httpStatus : 400).json(out);
+  }
+});
+
 router.get('/:id', auth, async (req, res) => {
   try {
     const r = await Retrait.findById(req.params.id);
@@ -621,38 +653,6 @@ router.post('/deriv-withdraw', async (req, res) => {
   } catch(e) {
     console.error('deriv-withdraw error:', e.code || '', e.message);
     res.status(e.httpStatus === 401 || e.httpStatus === 403 ? e.httpStatus : 400).json({ error: derivErrMsg(e), code: e.code || '' });
-  }
-});
-
-// GET /api/retrait/deriv-diag — DIAGNOSTIC connexion agent Deriv (admin).
-// Vérifie : config, agent_id (GET /agents/me), limites min/max USD. Sert à
-// valider que le retrait FONCTIONNERA avant tout retrait client réel.
-router.get('/deriv-diag', auth, async (req, res) => {
-  const out = { config: {}, agent: null, limits: null, ok: false };
-  try {
-    const { getDerivConfig } = require('./deriv');
-    const { getAgentId, restGetMyAgent, agentUsdLimits, clearAgentCache } = require('./derivRest');
-    const cfg = await getDerivConfig();
-    out.config = {
-      app_id: cfg.deriv_app_id ? 'OK' : 'MANQUANT',
-      token: cfg.deriv_token ? ('OK (' + String(cfg.deriv_token).slice(0, 4) + '…)') : 'MANQUANT',
-      agent_id_manuel: cfg.deriv_agent_id || '(auto)'
-    };
-    if (!cfg.deriv_app_id || !cfg.deriv_token) {
-      out.error = 'App ID ou Token Deriv manquant (Réglages admin).';
-      return res.status(400).json(out);
-    }
-    clearAgentCache();
-    const profile = await restGetMyAgent();
-    out.agent = { id: (profile && profile.id) || null, name: (profile && (profile.name || profile.paymentagent_name)) || '', currencies: (profile && profile.currencies) ? profile.currencies.map(c => c.currency) : [] };
-    out.limits = agentUsdLimits(profile);
-    if (!out.agent.id) { out.error = "agent_id introuvable — ce compte n'est peut-être pas Payment Agent, ou le token n'a pas le scope 'payment'."; return res.status(400).json(out); }
-    out.ok = true;
-    res.json(out);
-  } catch (e) {
-    out.error = derivErrMsg(e);
-    out.code = e.code || '';
-    res.status(e.httpStatus === 401 || e.httpStatus === 403 ? e.httpStatus : 400).json(out);
   }
 });
 
