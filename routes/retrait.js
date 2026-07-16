@@ -256,7 +256,10 @@ router.get('/deriv-diag', auth, async (req, res) => {
   } catch (e) {
     out.error = derivErrMsg(e);
     out.code = e.code || '';
-    res.status(e.httpStatus === 401 || e.httpStatus === 403 ? e.httpStatus : 400).json(out);
+    // IMPORTANT: ne jamais renvoyer 401/403 ici — l'admin interpréterait cela
+    // comme sa propre session expirée et ferait un logout. Toujours 400.
+    if (e.httpStatus === 401 || e.httpStatus === 403) out.error = 'Token agent Deriv invalide ou scope "payment" manquant — vérifiez le token.';
+    res.status(400).json(out);
   }
 });
 
