@@ -524,6 +524,24 @@ router.post('/betwinner-withdraw', async (req, res) => {
   }
 });
 
+// Traduction des erreurs Deriv en messages clairs (client + admin)
+function derivErrMsg(e) {
+  const code = String((e && e.code) || '').toLowerCase();
+  const raw  = String((e && e.message) || '');
+  if (e && (e.httpStatus === 401 || e.httpStatus === 403)) return 'Session Deriv expirée — reconnectez-vous à Deriv.';
+  if (code.includes('verification') || /verif|expir/i.test(raw))
+    return 'Code de vérification invalide ou expiré — redemandez un nouveau code.';
+  if (code.includes('invalidtoken') || code.includes('authorizationrequired') || code === 'token' || code.includes('invalid_token'))
+    return 'Session Deriv invalide/expirée — reconnectez-vous.';
+  if (code.includes('minimum')) return raw || 'Montant en dessous du minimum autorisé.';
+  if (code.includes('maximum')) return raw || 'Montant au-dessus du maximum autorisé.';
+  if (code.includes('insufficient') || code.includes('balance'))
+    return "Solde agent Deriv insuffisant — réessayez plus tard.";
+  if (code.includes('sameaccount')) return 'Compte identique agent/client non autorisé.';
+  if (code.includes('paymentagent')) return raw || 'Erreur Payment Agent Deriv.';
+  return raw || 'Erreur Deriv inconnue.';
+}
+
 router.post('/deriv-otp', async (req, res) => {
   try {
     const { tokenClient, montant } = req.body;
@@ -541,7 +559,7 @@ router.post('/deriv-otp', async (req, res) => {
     } catch (eLim) { console.error('deriv-otp limites agent (non bloquant):', eLim.message); }
     const r = await restSendWithdrawOtp(tokenClient, montantUsd, 'USD');
     res.json({ ok: true, expires_at: r.expires_at, next_request_at: r.next_request_at });
-  } catch(e) { res.status(e.httpStatus === 401 || e.httpStatus === 403 ? e.httpStatus : 400).json({ error: e.message, code: e.code || '' }); }
+  } catch(e) { res.status(e.httpStatus === 401 || e.httpStatus === 403 ? e.httpStatus : 400).json({ error: derivErrMsg(e), code: e.code || '' }); }
 });
 router.post('/deriv-withdraw', async (req, res) => {
   try {
@@ -589,7 +607,7 @@ router.post('/deriv-withdraw', async (req, res) => {
       operator: opKey, numero, montant: montantAr,
       type: 'retrait', ussdCode, sessionId,
       provider: 'Deriv', providerId,
-      montantUsd, rate, devise: 'USD',
+      montantUsd, rate, devise: (_isKmWd ? 'Fc' : 'Ar'),
       derivRequestId: w.request_id,
       status: confirmed ? 'processing' : 'pending',
       receptionStatus: confirmed ? 'confirme' : 'en_attente',
@@ -600,8 +618,44 @@ router.post('/deriv-withdraw', async (req, res) => {
     if (confirmed) dispatchUssdRetrait(retrait).catch(e => console.error('dispatchUssdRetrait (oauth):', e));
 
     res.json({ ok: true, id: retrait._id, sessionId, montantAr, status, pending: !confirmed });
-  } catch(e) { res.status(400).json({ error: e.message }); }
+  } catch(e) {
+    console.error('deriv-withdraw error:', e.code || '', e.message);
+    res.status(e.httpStatus === 401 || e.httpStatus === 403 ? e.httpStatus : 400).json({ error: derivErrMsg(e), code: e.code || '' });
+  }
 });
+
+// GET /api/retrait/deriv-diag — DIAGNOSTIC connexion agent Deriv (admin).
+// Vérifie : config, agent_id (GET /agents/me), limites min/max USD. Sert à
+// valider que le retrait FONCTIONNERA avant tout retrait client réel.
+router.get('/deriv-diag', auth, async (req, res) => {
+  const out = { config: {}, agent: null, limits: null, ok: false };
+  try {
+    const { getDerivConfig } = require('./deriv');
+    const { getAgentId, restGetMyAgent, agentUsdLimits, clearAgentCache } = require('./derivRest');
+    const cfg = await getDerivConfig();
+    out.config = {
+      app_id: cfg.deriv_app_id ? 'OK' : 'MANQUANT',
+      token: cfg.deriv_token ? ('OK (' + String(cfg.deriv_token).slice(0, 4) + '…)') : 'MANQUANT',
+      agent_id_manuel: cfg.deriv_agent_id || '(auto)'
+    };
+    if (!cfg.deriv_app_id || !cfg.deriv_token) {
+      out.error = 'App ID ou Token Deriv manquant (Réglages admin).';
+      return res.status(400).json(out);
+    }
+    clearAgentCache();
+    const profile = await restGetMyAgent();
+    out.agent = { id: (profile && profile.id) || null, name: (profile && (profile.name || profile.paymentagent_name)) || '', currencies: (profile && profile.currencies) ? profile.currencies.map(c => c.currency) : [] };
+    out.limits = agentUsdLimits(profile);
+    if (!out.agent.id) { out.error = "agent_id introuvable — ce compte n'est peut-être pas Payment Agent, ou le token n'a pas le scope 'payment'."; return res.status(400).json(out); }
+    out.ok = true;
+    res.json(out);
+  } catch (e) {
+    out.error = derivErrMsg(e);
+    out.code = e.code || '';
+    res.status(e.httpStatus === 401 || e.httpStatus === 403 ? e.httpStatus : 400).json(out);
+  }
+});
+
 module.exports = router;
 
 // POST /api/retrait/:id/valider — bouton VALIDÉ amin'ny admin panel
