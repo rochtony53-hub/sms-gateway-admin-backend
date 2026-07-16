@@ -80,13 +80,30 @@ async function restWithdrawStatus(tokenClient, request_id) {
   return { status: data.status, transaction_id: data.transaction_id };
 }
 
-// (Optionnel — DÉPÔT) transfert agent → client. Token = AGENT.
-async function restTransferToClient(toNickname, montantUsd, currency = 'USD', notes) {
+// (DÉPÔT) transfert agent → client via NICKNAME. Token = AGENT.
+// request_id STABLE (idempotence) : un relance avec le même request_id ne
+// double-crédite pas — Deriv déduplique côté serveur. Fourni par l'appelant
+// (dérivé de l'_id de l'ordre) ou généré si absent.
+async function restTransferToClient(toNickname, montantUsd, currency = 'USD', requestId, notes) {
   const cfg = await getDerivConfig();
-  const body = { data: { to_nickname: toNickname, amount: fmtAmount(montantUsd), currency } };
+  const request_id = (requestId && String(requestId).trim())
+    ? String(requestId).trim()
+    : ('dep' + Date.now().toString(36) + Math.floor(Math.random() * 1e6).toString(36));
+  const body = { data: { to_nickname: toNickname, amount: fmtAmount(montantUsd), currency, request_id } };
   if (notes) body.data.notes = String(notes).slice(0, 200);
   const data = await restCall('POST', '/payment-agents/v1/transfer', cfg.deriv_token, cfg.deriv_app_id, body);
-  return { ok: data.status === 'complete', status: data.status, transaction_id: data.transaction_id };
+  const status = (data.status || '').toLowerCase();
+  return { ok: status === 'complete', status: data.status, transaction_id: data.transaction_id, request_id };
+}
+
+// (DÉPÔT) statut d'un transfert — idempotence/suivi via le MÊME request_id.
+// Sert au cron de relance : vérifier si le transfert est déjà 'complete'
+// AVANT de (re)tenter, pour éviter tout double-crédit.
+async function restTransferStatus(request_id) {
+  const cfg = await getDerivConfig();
+  const data = await restCall('GET', '/payment-agents/v1/transfer/' + encodeURIComponent(request_id),
+    cfg.deriv_token, cfg.deriv_app_id);
+  return { status: data.status, transaction_id: data.transaction_id };
 }
 
 // Limites min/max USD de l'agent (mba hisorohana WithdrawalAmountMinimum/Maximum)
@@ -112,5 +129,5 @@ async function restGetMyAgent() {
 module.exports = {
   getAgentId, clearAgentCache, fmtAmount,
   restSendWithdrawOtp, restSubmitWithdraw, restWithdrawStatus,
-  restTransferToClient, restGetMyAgent, agentUsdLimits
+  restTransferToClient, restTransferStatus, restGetMyAgent, agentUsdLimits
 };

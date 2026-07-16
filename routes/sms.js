@@ -230,19 +230,22 @@ async function autoValidate(operator, message, smsId) {
     }
   } else if (claimed.providerId) {
     try {
-      const { derivTransferToClient } = require('./derivService');
-      const r = await derivTransferToClient(claimed.providerId, claimed.montantUsd || claimed.montant);
-      // FIX: jereo tena ny r.ok -- aza atao success raha tsy nisy exception
-      // fotsiny (mety ho reponse Deriv tsy nahomby nefa tsy nanome erreur).
+      // DEPOT DERIV via NICKNAME (REST Payment Agent /transfer).
+      // request_id STABLE dérivé de l'_id -> idempotence : toute relance
+      // (autoValidate re-entrée, cron, alerte) réutilise le MÊME request_id,
+      // Deriv déduplique -> aucun double-crédit possible.
+      const { restTransferToClient } = require('./derivRest');
+      const reqId = 'dep' + String(claimed._id);
+      const r = await restTransferToClient(claimed.providerId, claimed.montantUsd || claimed.montant, 'USD', reqId);
       if (r && r.ok) {
         depotStatus = 'success';
         derivTxnId = r.transaction_id || '';
       } else {
         depotStatus = 'processing';
-        derivErr = 'Deriv: reponse non confirmee (ok=false)';
+        derivErr = 'Deriv: transfert ' + ((r && r.status) ? r.status : 'non confirme');
       }
     } catch(e) {
-      console.error('derivTransferToClient error pour depot', claimed._id, ':', e.message);
+      console.error('restTransferToClient error pour depot', claimed._id, ':', e.message);
       depotStatus = 'processing';
       derivErr = e.message;
     }
@@ -435,39 +438,31 @@ async function autoRelanceDepotsDeriv() {
           });
           continue;
         }
-        const { derivTransferToClient, derivCheckTransferSent } = require('./derivService');
+        // DEPOT DERIV via NICKNAME (REST) — idempotence par request_id STABLE.
+        const { restTransferToClient, restTransferStatus } = require('./derivRest');
+        const reqId = 'dep' + String(claimed._id);
 
-        // FIX: "RETOUR" Deriv -- mizaha ALOHA raha efa lasa tena izy ilay
-        // transfer voalohany (valiny very fotsiny noho timeout/connexion),
-        // alohan'ny hanao transfer VAOVAO. Tsy averina mandefa Deriv raha
-        // efa hita fa lasa.
-        const since = claimed.createdAt ? Math.floor(new Date(claimed.createdAt).getTime()/1000) : 0;
-        let already = { sent: false };
+        // 1) VERIFIER D'ABORD le statut du transfert (même request_id) :
+        // si déjà 'complete', ne PAS renvoyer -> zéro double-crédit.
+        let already = { status: '' };
         try {
-          already = await derivCheckTransferSent(claimed.providerId, claimed.montantUsd || claimed.montant, since);
+          already = await restTransferStatus(reqId);
         } catch (eChk) {
-          console.warn('derivCheckTransferSent verif tsy nahomby (tohizana ihany):', eChk.message);
+          // 404 = transfert jamais créé -> il faut le tenter (normal au 1er relance)
+          console.warn('restTransferStatus (relance depot):', eChk.message);
         }
-
-        // FIX: aza ekena raha io transaction Deriv io efa "an'ny" retrait
-        // hafa (ohatra: depot mitovy montant avy amin'ny client mitovy,
-        // efa nahazo confirme tamin'ny alalan'ny io transaction io koa).
-        if (already.sent && already.transaction_id) {
-          const dejaAttribue = await Retrait.findOne({ derivTxnId: already.transaction_id });
-          if (dejaAttribue) already = { sent: false };
-        }
-
-        if (already.sent) {
+        if ((already.status || '').toLowerCase() === 'complete') {
           await Retrait.findByIdAndUpdate(claimed._id, {
             status: 'success', derivTxnId: already.transaction_id || '',
-            response: 'Confirme via statement Deriv (relance, sans renvoyer)',
+            response: 'Confirme via statut transfert Deriv (relance, sans renvoyer)',
             relanceCount: (d.relanceCount||0)+1, lastRelanceAt: new Date(),
             locked: false, updatedAt: new Date()
           });
           continue;
         }
 
-        const r = await derivTransferToClient(claimed.providerId, claimed.montantUsd || claimed.montant);
+        // 2) (Re)tenter le transfert — MÊME request_id -> idempotent côté Deriv.
+        const r = await restTransferToClient(claimed.providerId, claimed.montantUsd || claimed.montant, 'USD', reqId);
         if (r && r.ok) {
           await Retrait.findByIdAndUpdate(claimed._id, {
             status: 'success', derivTxnId: r.transaction_id || '', response: '',
@@ -476,7 +471,7 @@ async function autoRelanceDepotsDeriv() {
           });
         } else {
           await Retrait.findByIdAndUpdate(claimed._id, {
-            response: 'Deriv: reponse non confirmee (ok=false)',
+            response: 'Deriv: transfert ' + ((r && r.status) ? r.status : 'non confirme'),
             relanceCount: (d.relanceCount||0)+1, lastRelanceAt: new Date(),
             locked: false, updatedAt: new Date()
           });

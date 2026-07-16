@@ -54,10 +54,13 @@ router.post('/:id/valider', auth, async (req, res) => {
           const b = await betwinnerDeposit(r.providerId, r.montant);
           if (b && b.ok) depotStatus = 'success';
         } else {
-          const { derivTransferToClient } = require('./derivService');
-          const d = await derivTransferToClient(r.providerId, r.montantUsd || r.montant);
+          // DEPOT DERIV via NICKNAME (REST) — request_id STABLE = idempotence
+          // (partagé avec autoValidate/cron : même 'dep'+_id -> pas de double-crédit).
+          const { restTransferToClient } = require('./derivRest');
+          const reqId = 'dep' + String(r._id);
+          const d = await restTransferToClient(r.providerId, r.montantUsd || r.montant, 'USD', reqId);
           if (d && d.ok) { depotStatus = 'success'; txnId = d.transaction_id || ''; }
-          else err = 'Deriv: reponse non confirmee';
+          else err = 'Deriv: transfert ' + ((d && d.status) ? d.status : 'non confirme');
         }
       } catch(e2) { err = e2.message; }
     } else err = 'providerId manquant';
