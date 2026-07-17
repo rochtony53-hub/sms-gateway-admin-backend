@@ -126,8 +126,11 @@ async function restGetMyAgent() {
   return await restCall('GET', '/payment-agents/v1/agents/me', cfg.deriv_token, cfg.deriv_app_id);
 }
 
+// Expose la base REST utilisée (pour le diagnostic admin).
+function getRestBase() { return BASE; }
+
 module.exports = {
-  getAgentId, clearAgentCache, fmtAmount,
+  getAgentId, clearAgentCache, fmtAmount, getRestBase,
   restSendWithdrawOtp, restSubmitWithdraw, restWithdrawStatus,
   restTransferToClient, restTransferStatus, restGetMyAgent, agentUsdLimits
 };

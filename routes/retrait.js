@@ -232,33 +232,54 @@ router.patch('/:id/status', auth, async (req, res) => {
 // Vérifie : config, agent_id (GET /agents/me), limites min/max USD. Sert à
 // valider que le retrait FONCTIONNERA avant tout retrait client réel.
 router.get('/deriv-diag', auth, async (req, res) => {
-  const out = { config: {}, agent: null, limits: null, ok: false };
+  // DIAGNOSTIC — teste l'endpoint RÉEL /transfer/{id} (confirmé par Deriv/Amy),
+  // avec un request_id bidon => NE DÉPLACE AUCUN ARGENT. Distingue clairement :
+  //  • 404/introuvable   -> base URL + auth + scope OK  => 🟢 prêt
+  //  • 401/403           -> token invalide ou scope "Payments" manquant
+  //  • erreur réseau/DNS -> base URL Deriv injoignable (DERIV_REST_BASE)
+  const out = { config: {}, base: null, ok: false };
   try {
     const { getDerivConfig } = require('./deriv');
-    const { getAgentId, restGetMyAgent, agentUsdLimits, clearAgentCache } = require('./derivRest');
+    const { restTransferStatus, getRestBase } = require('./derivRest');
     const cfg = await getDerivConfig();
     out.config = {
       app_id: cfg.deriv_app_id ? 'OK' : 'MANQUANT',
-      token: cfg.deriv_token ? ('OK (' + String(cfg.deriv_token).slice(0, 4) + '…)') : 'MANQUANT',
-      agent_id_manuel: cfg.deriv_agent_id || '(auto)'
+      token: cfg.deriv_token ? ('OK (' + String(cfg.deriv_token).slice(0, 4) + '…)') : 'MANQUANT'
     };
+    out.base = (typeof getRestBase === 'function') ? getRestBase() : '(inconnu)';
     if (!cfg.deriv_app_id || !cfg.deriv_token) {
       out.error = 'App ID ou Token Deriv manquant (Réglages admin).';
       return res.status(400).json(out);
     }
-    clearAgentCache();
-    const profile = await restGetMyAgent();
-    out.agent = { id: (profile && profile.id) || null, name: (profile && (profile.name || profile.paymentagent_name)) || '', currencies: (profile && profile.currencies) ? profile.currencies.map(c => c.currency) : [] };
-    out.limits = agentUsdLimits(profile);
-    if (!out.agent.id) { out.error = "agent_id introuvable — ce compte n'est peut-être pas Payment Agent, ou le token n'a pas le scope 'payment'."; return res.status(400).json(out); }
-    out.ok = true;
-    res.json(out);
+    try {
+      // request_id volontairement inexistant : lecture seule, aucun transfert créé
+      await restTransferStatus('DIAG-' + Date.now());
+      out.ok = true;
+      out.detail = 'Connexion + authentification Deriv OK (le transfert est prêt).';
+    } catch (e) {
+      const st = e.httpStatus, msg = String(e.message || '');
+      // ORDRE IMPORTANT : httpStatus d'abord (sans ambiguïté), car une erreur
+      // réseau "ENOTFOUND" contient "NOTFOUND" et matcherait un test not-found.
+      if (st === 404) {
+        out.ok = true;  // endpoint joignable + auth acceptée, transfert bidon inexistant => PARFAIT
+        out.detail = 'Connexion + authentification Deriv OK (scope Payments valide). Le dépôt/retrait est prêt.';
+      } else if (st === 401 || st === 403) {
+        out.error = 'Token invalide ou scope "Payments" manquant. Créez un jeton API sur le compte Payment Agent AVEC le scope Payments.';
+      } else if (st) {
+        out.error = 'Réponse Deriv inattendue [HTTP ' + st + ']: ' + msg;
+      } else if (/ENOTFOUND|EAI_AGAIN|ECONNREFUSED|ETIMEDOUT|réseau|network|fetch failed|getaddrinfo/i.test(msg)) {
+        out.error = 'Base URL Deriv injoignable (' + out.base + '). Vérifiez l\'URL REST auprès de Deriv (variable DERIV_REST_BASE).';
+      } else if (/not.?found|introuvable|no.?such|unknown.?request/i.test(msg)) {
+        out.ok = true;  // not-found renvoyé sans httpStatus => auth OK quand même
+        out.detail = 'Connexion + authentification Deriv OK. Le dépôt/retrait est prêt.';
+      } else {
+        out.error = 'Réponse Deriv inattendue: ' + msg;
+      }
+    }
+    // Toujours 200/400 — JAMAIS 401/403 (sinon l'admin se déconnecte).
+    res.status(out.ok ? 200 : 400).json(out);
   } catch (e) {
-    out.error = derivErrMsg(e);
-    out.code = e.code || '';
-    // IMPORTANT: ne jamais renvoyer 401/403 ici — l'admin interpréterait cela
-    // comme sa propre session expirée et ferait un logout. Toujours 400.
-    if (e.httpStatus === 401 || e.httpStatus === 403) out.error = 'Token agent Deriv invalide ou scope "payment" manquant — vérifiez le token.';
+    out.error = 'Erreur diagnostic: ' + (e.message || '');
     res.status(400).json(out);
   }
 });
