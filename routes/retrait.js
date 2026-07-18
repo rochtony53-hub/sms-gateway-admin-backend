@@ -257,21 +257,21 @@ router.get('/deriv-diag', auth, async (req, res) => {
       out.ok = true;
       out.detail = 'Connexion + authentification Deriv OK (le transfert est prêt).';
     } catch (e) {
-      const st = e.httpStatus, msg = String(e.message || '');
-      // ORDRE IMPORTANT : httpStatus d'abord (sans ambiguïté), car une erreur
-      // réseau "ENOTFOUND" contient "NOTFOUND" et matcherait un test not-found.
-      if (st === 404) {
-        out.ok = true;  // endpoint joignable + auth acceptée, transfert bidon inexistant => PARFAIT
-        out.detail = 'Connexion + authentification Deriv OK (scope Payments valide). Le dépôt/retrait est prêt.';
-      } else if (st === 401 || st === 403) {
+      const st = e.httpStatus, code = String(e.code || ''), msg = String(e.message || '');
+      const blob = (code + ' ' + msg).toLowerCase();
+      // "request_id introuvable" (RequestIDNotFound, HTTP 400) = SUCCÈS : l'endpoint
+      // répond, l'auth passe, le scope est bon — seul notre request_id bidon n'existe pas.
+      const notFound = st === 404 || /requestidnotfound|request.?id.?not.?found|not.?found|introuvable|no.?such|unknown.?request|invalid.?request.?id/i.test(blob);
+      if (st === 401 || st === 403) {
         out.error = 'Token invalide ou scope "Payments" manquant. Créez un jeton API sur le compte Payment Agent AVEC le scope Payments.';
-      } else if (st) {
-        out.error = 'Réponse Deriv inattendue [HTTP ' + st + ']: ' + msg;
-      } else if (/ENOTFOUND|EAI_AGAIN|ECONNREFUSED|ETIMEDOUT|réseau|network|fetch failed|getaddrinfo/i.test(msg)) {
+      } else if (!st && /ENOTFOUND|EAI_AGAIN|ECONNREFUSED|ETIMEDOUT|réseau|network|fetch failed|getaddrinfo/i.test(msg)) {
+        // erreur réseau (pas de httpStatus) => base URL injoignable
         out.error = 'Base URL Deriv injoignable (' + out.base + '). Vérifiez l\'URL REST auprès de Deriv (variable DERIV_REST_BASE).';
-      } else if (/not.?found|introuvable|no.?such|unknown.?request/i.test(msg)) {
-        out.ok = true;  // not-found renvoyé sans httpStatus => auth OK quand même
-        out.detail = 'Connexion + authentification Deriv OK. Le dépôt/retrait est prêt.';
+      } else if (notFound) {
+        out.ok = true;  // endpoint + auth + scope OK, request_id bidon absent => PARFAIT
+        out.detail = 'Connexion + authentification Deriv OK (scope Payments valide). Le dépôt/retrait est prêt !';
+      } else if (st) {
+        out.error = 'Réponse Deriv inattendue [HTTP ' + st + ']: ' + (code || msg);
       } else {
         out.error = 'Réponse Deriv inattendue: ' + msg;
       }
