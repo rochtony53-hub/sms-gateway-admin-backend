@@ -581,20 +581,55 @@ router.post('/betwinner-withdraw', async (req, res) => {
 });
 
 // Traduction des erreurs Deriv en messages clairs (client + admin)
+// Traduction des codes d'erreur OFFICIELS Deriv (doc Payment Agent REST)
+// en messages clairs pour le client et l'admin.
+const DERIV_ERRORS = {
+  invalidotp:                    'Code de vérification incorrect — vérifiez le code reçu par email.',
+  otpvalidationfailed:           'Vérification du code échouée — redemandez un nouveau code.',
+  verificationcodeformatinvalid: 'Le code doit contenir exactement 6 chiffres.',
+  otpratelimitexceeded:          'Trop de demandes de code — patientez quelques minutes.',
+  otpvalidationratelimitexceeded:'Trop de tentatives — patientez quelques minutes.',
+  withdrawalamountminimum:       'Montant en dessous du minimum autorisé par l\'agent.',
+  withdrawalamountmaximum:       'Montant au-dessus du maximum autorisé par l\'agent.',
+  dailywithdrawalcountlimit:     'Limite quotidienne du nombre de retraits atteinte.',
+  dailywithdrawalamountlimit:    'Limite quotidienne du montant de retrait atteinte.',
+  walletfundsinsufficient:       'Solde insuffisant pour ce retrait.',
+  clientwithdrawdisabled:        'Les retraits par agent sont désactivés sur ce compte Deriv.',
+  agentdepositdisabled:          'Les dépôts par agent sont désactivés sur ce compte Deriv.',
+  noclientwallet:                'Aucun portefeuille Deriv trouvé pour ce compte.',
+  clientcountryunsupported:      'Pays non pris en charge par cet agent.',
+  nicknamenotfound:              'Nickname Deriv introuvable — vérifiez l\'orthographe exacte.',
+  nicknamelookupfailed:          'Recherche du nickname échouée — réessayez.',
+  agentselfwithdraw:             'Impossible de retirer vers le compte de l\'agent lui-même.',
+  agentselftransfer:             'Impossible de transférer vers le compte de l\'agent lui-même.',
+  agentcurrencyunsupported:      'Devise non prise en charge par cet agent.',
+  agentinactive:                 'Compte agent inactif chez Deriv.',
+  agentnotfound:                 'Agent introuvable.',
+  agentidnotfound:               'Agent introuvable (agent_id).',
+  agentidinvalid:                'Identifiant agent invalide.',
+  invalidagentid:                'Identifiant agent invalide.',
+  requestidused:                 'Cette demande a déjà été soumise (doublon évité).',
+  requestidnotfound:             'Demande introuvable chez Deriv.',
+  invalidrequestidformat:        'Format de référence de demande invalide.',
+  withdrawalfailed:              'Le retrait a échoué chez Deriv — réessayez plus tard.',
+  transferfailed:                'Le transfert a échoué chez Deriv — réessayez plus tard.',
+  invalidamount:                 'Montant invalide.',
+  invalidcurrency:               'Devise invalide.',
+  inputerror:                    'Données envoyées invalides.'
+};
+
 function derivErrMsg(e) {
   const code = String((e && e.code) || '').toLowerCase();
   const raw  = String((e && e.message) || '');
-  if (e && (e.httpStatus === 401 || e.httpStatus === 403)) return 'Session Deriv expirée — reconnectez-vous à Deriv.';
-  if (code.includes('verification') || /verif|expir/i.test(raw))
-    return 'Code de vérification invalide ou expiré — redemandez un nouveau code.';
-  if (code.includes('invalidtoken') || code.includes('authorizationrequired') || code === 'token' || code.includes('invalid_token'))
-    return 'Session Deriv invalide/expirée — reconnectez-vous.';
+  if (DERIV_ERRORS[code]) return DERIV_ERRORS[code];
+  if (e && e.httpStatus === 403) return 'Autorisation Deriv insuffisante (scope "payment" manquant) — reconnectez-vous.';
+  if (e && e.httpStatus === 401) return 'Session Deriv expirée — reconnectez-vous à Deriv.';
+  if (code.includes('otp') || code.includes('verification')) return 'Code de vérification invalide ou expiré — redemandez un nouveau code.';
   if (code.includes('minimum')) return raw || 'Montant en dessous du minimum autorisé.';
   if (code.includes('maximum')) return raw || 'Montant au-dessus du maximum autorisé.';
-  if (code.includes('insufficient') || code.includes('balance'))
-    return "Solde agent Deriv insuffisant — réessayez plus tard.";
-  if (code.includes('sameaccount')) return 'Compte identique agent/client non autorisé.';
-  if (code.includes('paymentagent')) return raw || 'Erreur Payment Agent Deriv.';
+  if (code.includes('insufficient') || code.includes('funds')) return 'Solde insuffisant — réessayez plus tard.';
+  if (code.includes('nickname')) return 'Nickname Deriv introuvable — vérifiez l\'orthographe exacte.';
+  if (code.includes('agent')) return raw || 'Erreur Payment Agent Deriv.';
   return raw || 'Erreur Deriv inconnue.';
 }
 

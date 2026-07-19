@@ -47,6 +47,13 @@ async function getAgentId(cfg) {
   _agentCache = { id, at: Date.now() };
   return id;
 }
+// App ID à envoyer pour les appels faits avec le TOKEN CLIENT (OAuth).
+// Le token vient de l'app OAuth : le header Deriv-App-ID doit correspondre à
+// CETTE app, pas à l'app PAT utilisée côté serveur pour le dépôt.
+function clientAppId(cfg) {
+  return (cfg && String(cfg.deriv_oauth_app_id || '').trim()) || (cfg && cfg.deriv_app_id) || '';
+}
+
 function clearAgentCache() { _agentCache = { id: null, at: 0 }; }
 
 function fmtAmount(n) { return (Math.round(Number(n) * 100) / 100).toFixed(2); }
@@ -56,7 +63,7 @@ async function restSendWithdrawOtp(tokenClient, montantUsd, currency = 'USD') {
   const cfg = await getDerivConfig();
   const agent_id = await getAgentId(cfg);
   const data = await restCall('POST', '/payment-agents/v1/withdraw/verification_code',
-    tokenClient, cfg.deriv_app_id,
+    tokenClient, clientAppId(cfg),
     { data: { agent_id, amount: fmtAmount(montantUsd), currency } });
   return { ok: true, agent_id, expires_at: data.expires_at, next_request_at: data.next_request_at };
 }
@@ -67,7 +74,7 @@ async function restSubmitWithdraw(tokenClient, otp, montantUsd, currency = 'USD'
   const agent_id = await getAgentId(cfg);
   const request_id = 'mm' + Date.now().toString(36) + Math.floor(Math.random() * 1e6).toString(36);
   const data = await restCall('POST', '/payment-agents/v1/withdraw',
-    tokenClient, cfg.deriv_app_id,
+    tokenClient, clientAppId(cfg),
     { data: { agent_id, amount: fmtAmount(montantUsd), currency, verification_code: String(otp).trim(), request_id } });
   return { status: data.status, transaction_id: data.transaction_id, request_id, agent_id };
 }
@@ -76,7 +83,7 @@ async function restSubmitWithdraw(tokenClient, otp, montantUsd, currency = 'USD'
 async function restWithdrawStatus(tokenClient, request_id) {
   const cfg = await getDerivConfig();
   const data = await restCall('GET', '/payment-agents/v1/withdraw/' + encodeURIComponent(request_id),
-    tokenClient, cfg.deriv_app_id);
+    tokenClient, clientAppId(cfg));
   return { status: data.status, transaction_id: data.transaction_id };
 }
 
@@ -130,7 +137,7 @@ async function restGetMyAgent() {
 function getRestBase() { return BASE; }
 
 module.exports = {
-  getAgentId, clearAgentCache, fmtAmount, getRestBase,
+  getAgentId, clearAgentCache, fmtAmount, getRestBase, clientAppId,
   restSendWithdrawOtp, restSubmitWithdraw, restWithdrawStatus,
   restTransferToClient, restTransferStatus, restGetMyAgent, agentUsdLimits
 };
