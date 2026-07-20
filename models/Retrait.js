@@ -18,6 +18,9 @@ const retraitSchema = new mongoose.Schema({
   // famoronana, mba ho azo amin'ny relance/retry foana ny CR marina.
   providerId: { type: String, default: '' },
   derivRequestId: { type: String, default: '', index: true },
+  // Token OAuth client — sert UNIQUEMENT a interroger le statut du retrait chez
+  // Deriv. Efface des que le retrait est regle (complete/rejected/failed).
+  derivClientToken: { type: String, default: '' },
   // Cle d'idempotence (retry cote client-api - evite les doublons)
   clientRef: { type: String, default: '', index: true },
   // FIX: ID transaction nampodin'i Deriv rehefa vita ny transfer -- saha MIAVAKA

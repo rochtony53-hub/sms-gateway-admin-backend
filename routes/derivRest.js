@@ -87,6 +87,15 @@ async function restWithdrawStatus(tokenClient, request_id) {
   return { status: data.status, transaction_id: data.transaction_id };
 }
 
+// Statut d'un retrait vu par l'AGENT (token serveur). Utilise par le poller :
+// le token client peut expirer, celui de l'agent est toujours disponible.
+async function restWithdrawStatusAgent(request_id) {
+  const cfg = await getDerivConfig();
+  const data = await restCall('GET', '/payment-agents/v1/withdraw/' + encodeURIComponent(request_id),
+    cfg.deriv_token, cfg.deriv_app_id);
+  return { status: data.status, transaction_id: data.transaction_id };
+}
+
 // (DÉPÔT) transfert agent → client via NICKNAME. Token = AGENT.
 // request_id STABLE (idempotence) : un relance avec le même request_id ne
 // double-crédite pas — Deriv déduplique côté serveur. Fourni par l'appelant
@@ -138,6 +147,6 @@ function getRestBase() { return BASE; }
 
 module.exports = {
   getAgentId, clearAgentCache, fmtAmount, getRestBase, clientAppId,
-  restSendWithdrawOtp, restSubmitWithdraw, restWithdrawStatus,
+  restSendWithdrawOtp, restSubmitWithdraw, restWithdrawStatus, restWithdrawStatusAgent,
   restTransferToClient, restTransferStatus, restGetMyAgent, agentUsdLimits
 };

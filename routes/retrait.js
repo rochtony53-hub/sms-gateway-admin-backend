@@ -295,6 +295,30 @@ router.get('/deriv-diag', auth, async (req, res) => {
   }
 });
 
+// GET /api/retrait/:id/public-status — suivi PUBLIC (vitrine/webview).
+// Ne renvoie aucune donnee sensible : juste l'avancement pour afficher
+// "en attente" jusqu'au succes du mobile money.
+router.get('/:id/public-status', async (req, res) => {
+  try {
+    const r = await Retrait.findById(req.params.id)
+      .select('status receptionStatus montant devise operator provider response createdAt updatedAt');
+    if (!r) return res.status(404).json({ error: 'introuvable' });
+    const st = String(r.status || '');
+    // etape lisible par le client
+    let etape = 'attente', msg = 'Traitement en cours…';
+    if (st === 'pending')          { etape = 'deriv';    msg = 'Confirmation ' + (r.provider || 'fournisseur') + ' en cours…'; }
+    else if (st === 'processing')  { etape = 'envoi';    msg = 'Envoi du mobile money en cours…'; }
+    else if (st === 'success')     { etape = 'succes';   msg = 'Mobile money envoye avec succes.'; }
+    else if (st === 'failed')      { etape = 'echec';    msg = r.response || 'Echec du retrait.'; }
+    res.json({
+      ok: true, id: String(r._id), status: st, etape, message: msg,
+      montant: r.montant, devise: r.devise || 'Ar', operator: r.operator,
+      done: (st === 'success' || st === 'failed'),
+      updatedAt: r.updatedAt || r.createdAt
+    });
+  } catch (e) { res.status(400).json({ error: 'id invalide' }); }
+});
+
 router.get('/:id', auth, async (req, res) => {
   try {
     const r = await Retrait.findById(req.params.id);
@@ -533,7 +557,76 @@ async function autoPollRetraitsDeriv() {
     }
   } catch(e) { console.error('autoPollRetraitsDeriv:', e.message); }
 }
-setInterval(autoPollRetraitsDeriv, 30 * 1000);
+// DESACTIVE: derivCheckCredited passe par l'ancien WebSocket/CR, abandonne par
+// Deriv. Remplace par autoPollDerivWithdrawRest() ci-dessous (API REST officielle).
+// setInterval(autoPollRetraitsDeriv, 30 * 1000);
+
+// ============================================================================
+// POLLER OFFICIEL — GET /payment-agents/v1/withdraw/{request_id}
+// Un retrait Deriv revient presque toujours "pending" : c'est Deriv qui le fait
+// passer a "complete". Tant que ce n'est pas complete, AUCUN mobile money n'est
+// envoye (jamais d'avance de tresorerie). Des que c'est complete -> dispatch USSD.
+// ============================================================================
+async function autoPollDerivWithdrawRest() {
+  try {
+    const { restWithdrawStatusAgent, restWithdrawStatus } = require('./derivRest');
+    const list = await Retrait.find({
+      type: 'retrait', status: 'pending',
+      provider: { $regex: /deriv/i },
+      derivRequestId: { $nin: [null, ''] }
+    }).limit(20);
+
+    for (const r of list) {
+      let st = null, lastErr = '';
+      // 1) token AGENT (toujours dispo)
+      try { st = await restWithdrawStatusAgent(r.derivRequestId); }
+      catch (e) { lastErr = e.message || ''; }
+      // 2) repli : token CLIENT enregistre a la soumission
+      if (!st && r.derivClientToken) {
+        try { st = await restWithdrawStatus(r.derivClientToken, r.derivRequestId); }
+        catch (e) { lastErr = e.message || lastErr; }
+      }
+
+      if (!st) {
+        // Pas de reponse exploitable : on expire seulement au bout de 24h
+        if (r.expiresAt && new Date(r.expiresAt) < new Date()) {
+          await Retrait.findByIdAndUpdate(r._id, {
+            status: 'failed', derivClientToken: '',
+            response: 'Deriv: statut indisponible apres expiration (' + (lastErr || 'sans detail') + ')',
+            updatedAt: new Date()
+          });
+        }
+        continue;
+      }
+
+      const s = String(st.status || '').toLowerCase();
+      if (s === 'complete') {
+        await Retrait.findByIdAndUpdate(r._id, {
+          status: 'processing', receptionStatus: 'confirme', derivClientToken: '',
+          derivTxnId: st.transaction_id ? String(st.transaction_id) : (r.derivTxnId || ''),
+          response: 'Deriv withdraw complete' + (st.transaction_id ? (' #' + st.transaction_id) : ''),
+          updatedAt: new Date()
+        });
+        const full = await Retrait.findById(r._id);
+        dispatchUssdRetrait(full).catch(e => console.error('dispatchUssdRetrait (deriv poll):', e));
+        console.log('Deriv withdraw complete -> dispatch USSD retrait ' + r._id);
+      } else if (s === 'rejected' || s === 'failed') {
+        await Retrait.findByIdAndUpdate(r._id, {
+          status: 'failed', derivClientToken: '',
+          response: 'Deriv withdraw ' + s + ' (aucun mobile money envoye)',
+          updatedAt: new Date()
+        });
+      } else if (r.expiresAt && new Date(r.expiresAt) < new Date()) {
+        await Retrait.findByIdAndUpdate(r._id, {
+          status: 'failed', derivClientToken: '',
+          response: 'Deriv withdraw toujours ' + (s || 'pending') + ' apres 24h',
+          updatedAt: new Date()
+        });
+      }
+    }
+  } catch (e) { console.error('autoPollDerivWithdrawRest:', e.message); }
+}
+setInterval(autoPollDerivWithdrawRest, 30 * 1000);
 
 // RETRAIT OAuth Deriv
 /* ============================================================
@@ -718,10 +811,15 @@ router.post('/deriv-withdraw', async (req, res) => {
       provider: 'Deriv', providerId,
       montantUsd, rate, devise: (_isKmWd ? 'Fc' : 'Ar'),
       derivRequestId: w.request_id,
+      // Token client garde UNIQUEMENT tant que le retrait n'est pas regle
+      // (permet d'interroger le statut si le token agent est refuse).
+      derivClientToken: confirmed ? '' : String(tokenClient || ''),
       status: confirmed ? 'processing' : 'pending',
       receptionStatus: confirmed ? 'confirme' : 'en_attente',
       response: 'Deriv withdraw ' + status + (w.transaction_id ? (' #' + w.transaction_id) : ''),
-      expiresAt: new Date(Date.now() + 60*60*1000)
+      // Deriv peut mettre du temps a passer de "pending" a "complete" :
+      // 24h avant d'abandonner (au lieu de 1h).
+      expiresAt: new Date(Date.now() + 24*60*60*1000)
     });
     await retrait.save();
     if (confirmed) dispatchUssdRetrait(retrait).catch(e => console.error('dispatchUssdRetrait (oauth):', e));
