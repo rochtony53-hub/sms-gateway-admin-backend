@@ -715,6 +715,47 @@ router.post('/deriv-withdraw', async (req, res) => {
   }
 });
 
+// POST /api/retrait/deriv-oauth-token — echange le code OAuth2 (PKCE) contre un
+// access_token client. Appele par la vitrine au retour de auth.deriv.com.
+// PUBLIC : le code n'est utilisable qu'une fois et vient de Deriv lui-meme.
+router.post('/deriv-oauth-token', async (req, res) => {
+  try {
+    const { code, code_verifier, redirect_uri } = req.body || {};
+    if (!code) return res.status(400).json({ error: 'Code d\'autorisation manquant.' });
+    const { getDerivConfig } = require('./deriv');
+    const cfg = await getDerivConfig();
+    const clientId = String(cfg.deriv_oauth_app_id || '').trim();
+    if (!clientId) return res.status(400).json({ error: 'App ID OAuth non configure (Reglages admin).' });
+
+    const url = process.env.DERIV_OAUTH_TOKEN_URL || 'https://auth.deriv.com/oauth2/token';
+    const form = new URLSearchParams({
+      grant_type: 'authorization_code',
+      client_id: clientId,
+      code: String(code),
+      redirect_uri: String(redirect_uri || '')
+    });
+    if (code_verifier) form.set('code_verifier', String(code_verifier));
+
+    const r = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'Accept': 'application/json' },
+      body: form.toString()
+    });
+    const txt = await r.text();
+    let j = {}; try { j = JSON.parse(txt); } catch (e) {}
+    if (!r.ok || !j.access_token) {
+      console.error('deriv-oauth-token FAIL', r.status, String(txt).slice(0, 300));
+      return res.status(400).json({
+        error: j.error_description || j.error || ('Echec de l\'echange de token [HTTP ' + r.status + ']')
+      });
+    }
+    res.json({ ok: true, token: j.access_token, expires_in: j.expires_in || null });
+  } catch (e) {
+    console.error('deriv-oauth-token error', e.message);
+    res.status(400).json({ error: 'Echange de token echoue: ' + (e.message || '') });
+  }
+});
+
 module.exports = router;
 
 // POST /api/retrait/:id/valider — bouton VALIDÉ amin'ny admin panel
