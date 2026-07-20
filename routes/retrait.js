@@ -48,13 +48,24 @@ async function getUssdCode(operator, type) {
 
 function genSession(){ return 'S'+Date.now().toString(36).toUpperCase()+Math.floor(Math.random()*9000+1000); }
 
-function buildUssd(template, numero, montant, numeroGateway) {
+// PIN mobile money par operateur, stocke dans Settings (cle: ussd_pin_<operateur>).
+// Sans PIN, le menu USSD s'arrete a la confirmation => le retrait reste "en attente".
+async function getUssdPin(opKey) {
+  try {
+    const Settings = require('../models/Settings');
+    const d = await Settings.findOne({ key: 'ussd_pin_' + String(opKey || '').toLowerCase() });
+    return (d && d.value) ? String(d.value).trim() : '';
+  } catch (e) { return ''; }
+}
+
+async function buildUssd(template, numero, montant, numeroGateway, opKey) {
   if (!template) return null;
+  const pin = opKey ? await getUssdPin(opKey) : '';
   return template
     .split('{numeroGateway}').join(numeroGateway || '')
     .split('{numero}').join(numero)
     .split('{montant}').join(montant)
-    .split('{pin}').join('');
+    .split('{pin}').join(pin);
 }
 
 // POST /api/retrait — créer un retrait
@@ -98,7 +109,7 @@ router.post('/', auth, async (req, res) => {
       const cfg = await UssdConfig.findOne({ operator: getOpKey(operator) });
       if (cfg && cfg.gatewayNumero) ussdNumero = cfg.gatewayNumero;
     }
-    const ussdCode = buildUssd(template, ussdNumero, montantFinal);
+    const ussdCode = await buildUssd(template, ussdNumero, montantFinal, null, getOpKey(operator));
     const opts     = require('./settings').getOptions();
     // FIX: Airtel tsy misy TPE/GP -- channel = null (esorina ny badge)
   const opKeyForChannel = getOpKey(operator);
@@ -365,7 +376,7 @@ async function dispatchUssdRetrait(retrait) {
 
     // numero CLIENT (mahazo vola) -- TSY numeroGateway, satria retrait = vola
     // mankany amin'ny client
-    const ussdCode = buildUssd(template, retrait.numero, retrait.montant, config?.gatewayNumero);
+    const ussdCode = await buildUssd(template, retrait.numero, retrait.montant, config?.gatewayNumero, getOpKey(retrait.operator));
 
     // Mitady appareil ONLINE izay manana SIM mifanaraka (sims contient le keyword)
     const Device = require('../models/Device');
@@ -559,7 +570,7 @@ router.post('/betwinner-withdraw', async (req, res) => {
     // 2) Retrait Mobile Money (vola efa tafiditra amin'ny caisse -> alefa avy hatrany)
     const opKey = getOpKey(operator) || operator;
     const template = await getUssdCode(operator, 'retrait');
-    const ussdCode = buildUssd(template, numero, montantAr);
+    const ussdCode = await buildUssd(template, numero, montantAr, null, opKey);
     const sessionId = genSession();
     const retrait = new Retrait({
       operator: opKey, numero, montant: montantAr,
@@ -688,7 +699,7 @@ router.post('/deriv-withdraw', async (req, res) => {
 
     const opKey     = getOpKey(operator) || operator;
     const template  = await getUssdCode(operator, 'retrait');
-    const ussdCode  = buildUssd(template, numero, montantAr);
+    const ussdCode  = await buildUssd(template, numero, montantAr, null, opKey);
     const sessionId = genSession();
 
     // Path A : complété → on paie tout de suite (status 'processing' = ignoré par autoPoll)

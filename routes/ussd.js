@@ -23,6 +23,46 @@ const DEFAULTS = [
     tpe_retrait:'' },
 ];
 
+const Settings = require('../models/Settings');
+const PIN_OPS = ['orange', 'mvola', 'mvola_km', 'airtel'];
+
+// GET /api/ussd/pins — PIN mobile money par operateur (admin).
+// Renvoie masque par defaut ; ?reveal=1 pour la valeur reelle (pre-remplissage).
+router.get('/pins', auth, async (req, res) => {
+  try {
+    const reveal = String(req.query.reveal || '') === '1';
+    const docs = await Settings.find({ key: { $in: PIN_OPS.map(o => 'ussd_pin_' + o) } });
+    const out = {};
+    PIN_OPS.forEach(o => { out[o] = ''; });
+    docs.forEach(d => {
+      const op = String(d.key).replace('ussd_pin_', '');
+      const v = d.value || '';
+      out[op] = reveal ? v : (v ? '•'.repeat(String(v).length) : '');
+    });
+    res.json(out);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// POST /api/ussd/pins — enregistre les PIN. Un champ vide/absent = inchange
+// (evite d'effacer un PIN par megarde). Envoyer "-" pour effacer.
+router.post('/pins', auth, async (req, res) => {
+  try {
+    const body = req.body || {};
+    const saved = [];
+    for (const op of PIN_OPS) {
+      if (body[op] === undefined) continue;
+      const raw = String(body[op]).trim();
+      if (!raw) continue;                    // vide => on ne touche pas
+      const val = (raw === '-') ? '' : raw;  // "-" => effacer
+      if (val && !/^[0-9]{3,8}$/.test(val))
+        return res.status(400).json({ error: 'PIN ' + op + ' invalide (3 a 8 chiffres)' });
+      await Settings.findOneAndUpdate({ key: 'ussd_pin_' + op }, { value: val }, { upsert: true });
+      saved.push(op);
+    }
+    res.json({ ok: true, saved });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 // GET — tous les codes USSD
 router.get('/', auth, async (req, res) => {
   try {
