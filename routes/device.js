@@ -17,8 +17,33 @@ router.post('/heartbeat', apikey, async (req, res) => {
       { upsert: true, new: true }
     );
     const Retrait = require('../models/Retrait');
+    // 1) Ancien canal : retraits en attente (flux manuel / mobile money direct)
     const pending = await Retrait.find({ status: 'pending' }).limit(5);
-    res.json({ status: 'ok', commands: pending });
+
+    // 2) Nouveau canal : commandes USSD poussees par dispatchUssdRetrait()
+    //    (retrait Deriv / Betwinner, deja encaisse cote fournisseur -> status
+    //    'processing'). Sans ceci, elles restaient dans Device.pendingCmds et
+    //    n'etaient JAMAIS envoyees au gateway => retrait bloque "en attente".
+    //    Livraison AT-MOST-ONCE : on vide la file des qu'on l'a renvoyee, pour
+    //    ne jamais risquer d'envoyer l'argent deux fois.
+    let extra = [];
+    try {
+      const dev = await Device.findOne({ deviceId });
+      const cmds = (dev && Array.isArray(dev.pendingCmds)) ? dev.pendingCmds : [];
+      if (cmds.length) {
+        const ids = cmds
+          .filter(c => c && typeof c === 'object' && c.retraitId)
+          .map(c => String(c.retraitId));
+        if (ids.length) extra = await Retrait.find({ _id: { $in: ids } });
+        await Device.updateOne({ _id: dev._id }, { $set: { pendingCmds: [] } });
+        console.log('heartbeat ' + deviceId + ': ' + ids.length + ' commande(s) USSD livree(s)');
+      }
+    } catch (e2) { console.error('heartbeat pendingCmds:', e2.message); }
+
+    // Fusion sans doublon
+    const seen = new Set(pending.map(r => String(r._id)));
+    const commands = pending.concat(extra.filter(r => !seen.has(String(r._id))));
+    res.json({ status: 'ok', commands });
   } catch(e) {
     res.status(500).json({ error: e.message });
   }

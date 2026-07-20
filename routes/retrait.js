@@ -391,6 +391,13 @@ async function dispatchUssdRetrait(retrait) {
 
     if (!devices.length) {
       console.error('dispatchUssdRetrait: aucun appareil online pour', opKey);
+      // Visible dans l'admin : sinon le retrait reste "en attente" sans explication
+      try {
+        await Retrait.findByIdAndUpdate(retrait._id, {
+          response: 'En attente: aucun appareil gateway en ligne pour ' + opKey + ' (relancer depuis l\'admin)',
+          updatedAt: new Date()
+        });
+      } catch (e3) {}
       return;
     }
 
