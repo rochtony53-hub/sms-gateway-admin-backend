@@ -94,12 +94,16 @@ async function betwinnerPayout(userId, code) {
 }
 
 // RECHERCHE JOUEUR — GET /Users/{userId}?confirm=&cashdeskid=
-// step1: "hash={h}&userId={u}&cashdeskid={c}"   step2: "userId={u}&cashierpass={p}&hash={h}"
+// ATTENTION : le doc ecrit "userId" (majuscule) mais l'API ne l'accepte PAS.
+// Diagnostic en production : seule la variante "userid" MINUSCULE renvoie 200.
+// C'est coherent avec la signature generale du doc, dont le vecteur officiel
+// n'est reproductible qu'avec "userid" minuscule.
+// step1: "hash={h}&userid={u}&cashdeskid={c}"   step2: "userid={u}&cashierpass={p}&hash={h}"
 async function betwinnerFindUser(userId) {
   const cfg = await getBetwinnerConfig();
   requireCfg(cfg);
-  const s1 = sha256(`hash=${cfg.betwinner_hash}&userId=${userId}&cashdeskid=${cfg.betwinner_cashdeskid}`);
-  const s2 = md5(`userId=${userId}&cashierpass=${cfg.betwinner_cashierpass}&hash=${cfg.betwinner_hash}`);
+  const s1 = sha256(`hash=${cfg.betwinner_hash}&userid=${userId}&cashdeskid=${cfg.betwinner_cashdeskid}`);
+  const s2 = md5(`userid=${userId}&cashierpass=${cfg.betwinner_cashierpass}&hash=${cfg.betwinner_hash}`);
   const sign = sha256(s1 + s2);
   const confirm = md5(`${userId}:${cfg.betwinner_hash}`);
   const data = await bwFetch('GET',

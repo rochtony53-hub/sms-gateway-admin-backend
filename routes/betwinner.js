@@ -77,6 +77,41 @@ router.get('/diag', auth, async (req, res) => {
       }
     }
 
+    // --- 1bis) Variantes pour le solde caisse (si l'appel standard a echoue) ---
+    if (out.balanceError) {
+      const d = new Date(); const pad = n => String(n).padStart(2, '0');
+      const dt = d.getUTCFullYear() + '.' + pad(d.getUTCMonth()+1) + '.' + pad(d.getUTCDate())
+               + ' ' + pad(d.getUTCHours()) + ':' + pad(d.getUTCMinutes()) + ':' + pad(d.getUTCSeconds());
+      const confirmB = md5(C + ':' + H);
+      const balVariants = [
+        { nom: 'A doc (cashdeskid minuscule)', s1: 'hash=' + H + '&cashdeskid=' + C + '&dt=' + dt,
+          s2: 'dt=' + dt + '&cashierpass=' + P + '&cashdeskid=' + C },
+        { nom: 'B cashdeskId camel',           s1: 'hash=' + H + '&cashdeskId=' + C + '&dt=' + dt,
+          s2: 'dt=' + dt + '&cashierpass=' + P + '&cashdeskId=' + C },
+        { nom: 'C avec lng',                   s1: 'hash=' + H + '&lng=' + L + '&cashdeskid=' + C + '&dt=' + dt,
+          s2: 'dt=' + dt + '&cashierpass=' + P + '&cashdeskid=' + C },
+        { nom: 'D s2 avec hash',               s1: 'hash=' + H + '&cashdeskid=' + C + '&dt=' + dt,
+          s2: 'dt=' + dt + '&cashierpass=' + P + '&hash=' + H }
+      ];
+      out.balanceVariants = [];
+      for (const v of balVariants) {
+        const sign = sha256(sha256(v.s1) + md5(v.s2));
+        try {
+          const r = await fetch(BASE + '/Cashdesk/' + encodeURIComponent(C) +
+            '/Balance?confirm=' + confirmB + '&dt=' + encodeURIComponent(dt), { headers: { sign } });
+          const txt = await r.text();
+          out.balanceVariants.push({
+            variante: v.nom, http: r.status,
+            resultat: r.status === 200 ? '✅ ACCEPTEE' : (r.status === 401 ? 'signature refusee' : 'HTTP ' + r.status),
+            apercu: String(txt).slice(0, 100)
+          });
+          if (r.status === 200) { out.balanceVarianteValide = v.nom; break; }
+        } catch (e) {
+          out.balanceVariants.push({ variante: v.nom, resultat: 'erreur reseau: ' + (e.message || '') });
+        }
+      }
+    }
+
     // --- 2) Variantes de signature pour la recherche joueur ---
     const uid = String(req.query.userId || '').trim();
     if (uid) {
