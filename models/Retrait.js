@@ -8,6 +8,10 @@ const retraitSchema = new mongoose.Schema({
   type:      { type: String, enum: ['retrait','depot'], default: 'retrait' },
   channel:   { type: String, enum: ['gp','tpe','TPE','Grand Public'], default: 'gp' },
   ussdCode:  { type: String },
+  // PIN a saisir SEPAREMENT par le gateway quand l'operateur affiche l'invite
+  // "Entrez votre code secret" (Orange refuse un code USSD contenant deja le PIN).
+  // Vide = PIN inclus dans ussdCode (ancien comportement).
+  ussdPin:   { type: String, default: '' },
   sessionId: { type: String, index: true },
   clientId:   { type: String, default: '', index: true },
   montantUsd: { type: Number, default: 0 },

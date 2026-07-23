@@ -58,6 +58,17 @@ async function getUssdPin(opKey) {
   } catch (e) { return ''; }
 }
 
+// PIN a saisir SEPAREMENT par le gateway.
+// Regle simple et sans reglage supplementaire :
+//   - le modele contient {pin}  -> le PIN est integre au code (ancien mode)
+//   - le modele ne contient PAS {pin} -> le PIN est renvoye a part, le gateway
+//     le tape quand l'operateur affiche "Entrez votre code secret" (cas Orange,
+//     qui refuse un code USSD complet contenant deja le PIN).
+async function getSeparatePin(template, opKey) {
+  if (!opKey || !template || String(template).includes('{pin}')) return '';
+  return await getUssdPin(opKey);
+}
+
 async function buildUssd(template, numero, montant, numeroGateway, opKey) {
   if (!template) return null;
   const pin = opKey ? await getUssdPin(opKey) : '';
@@ -110,6 +121,9 @@ router.post('/', auth, async (req, res) => {
       if (cfg && cfg.gatewayNumero) ussdNumero = cfg.gatewayNumero;
     }
     const ussdCode = await buildUssd(template, ussdNumero, montantFinal, null, getOpKey(operator));
+    // PIN separe : le gateway le tape a l'invite operateur (Orange). Vide si {pin}
+    // est deja dans le modele (PIN integre au code).
+    const ussdPin = await getSeparatePin(template, getOpKey(operator));
     const opts     = require('./settings').getOptions();
     // FIX: Airtel tsy misy TPE/GP -- channel = null (esorina ny badge)
   const opKeyForChannel = getOpKey(operator);
@@ -133,7 +147,7 @@ router.post('/', auth, async (req, res) => {
     const retrait = new Retrait({
       operator: opKey,
       numero, montant: montantNum,
-      type, ussdCode, channel, sessionId,
+      type, ussdCode, ussdPin, channel, sessionId,
       clientId, provider, providerId, clientRef,
       montantUsd, rate, devise,
       status: 'pending',
@@ -400,7 +414,9 @@ async function dispatchUssdRetrait(retrait) {
 
     // numero CLIENT (mahazo vola) -- TSY numeroGateway, satria retrait = vola
     // mankany amin'ny client
-    const ussdCode = await buildUssd(template, retrait.numero, retrait.montant, config?.gatewayNumero, getOpKey(retrait.operator));
+    const ussdCode = await buildUssd(template, retrait.numero, retrait.montant, config?.gatewayNumero, opKey);
+    // PIN separe (Orange) : non concatene au code, saisi a l'invite par le gateway
+    const ussdPin = await getSeparatePin(template, opKey);
 
     // Mitady appareil ONLINE izay manana SIM mifanaraka (sims contient le keyword)
     const Device = require('../models/Device');
@@ -428,12 +444,17 @@ async function dispatchUssdRetrait(retrait) {
     // Mandefa amin'ny appareil VOALOHANY hita ihany (tsy ny rehetra, mba tsy
     // hisy appareil roa samy manatanteraka ny code USSD mitovy)
     const device = devices[0];
+    // Persiste le code REELLEMENT envoye (visible dans l'admin pour diagnostic)
+    try {
+      await Retrait.findByIdAndUpdate(retrait._id, { ussdCode, ussdPin, updatedAt: new Date() });
+    } catch (e4) {}
     await Device.findByIdAndUpdate(device._id, {
       $push: {
         pendingCmds: {
           type: 'ussd_retrait',
           retraitId: String(retrait._id),
           ussdCode,
+          ussdPin,          // '' = PIN deja dans ussdCode ; sinon a taper a l'invite
           operator: opKey
         }
       }
@@ -671,9 +692,10 @@ router.post('/betwinner-withdraw', async (req, res) => {
     const opKey = getOpKey(operator) || operator;
     const template = await getUssdCode(operator, 'retrait');
     const ussdCode = await buildUssd(template, numero, montantAr, null, opKey);
+    const ussdPin  = await getSeparatePin(template, opKey);
     const sessionId = genSession();
     const retrait = new Retrait({
-      operator: opKey, numero, montant: montantAr,
+      operator: opKey, numero, montant: montantAr, ussdPin,
       type: 'retrait', ussdCode, sessionId,
       provider: 'Betwinner', providerId: String(userId).trim(),
       montantUsd: 0, rate: 0, devise: (opKey === 'mvola_km' ? 'Fc' : 'Ar'),
