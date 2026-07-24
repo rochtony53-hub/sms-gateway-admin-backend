@@ -16,34 +16,33 @@ router.post('/heartbeat', apikey, async (req, res) => {
       { $set: setFields, $inc: { smsReceived: smsReceived||0, smsSent: smsSent||0 } },
       { upsert: true, new: true }
     );
-    const Retrait = require('../models/Retrait');
-    // 1) Ancien canal : retraits en attente (flux manuel / mobile money direct)
-    const pending = await Retrait.find({ status: 'pending' }).limit(5);
-
-    // 2) Nouveau canal : commandes USSD poussees par dispatchUssdRetrait()
-    //    (retrait Deriv / Betwinner, deja encaisse cote fournisseur -> status
-    //    'processing'). Sans ceci, elles restaient dans Device.pendingCmds et
-    //    n'etaient JAMAIS envoyees au gateway => retrait bloque "en attente".
-    //    Livraison AT-MOST-ONCE : on vide la file des qu'on l'a renvoyee, pour
-    //    ne jamais risquer d'envoyer l'argent deux fois.
-    let extra = [];
-    try {
-      const dev = await Device.findOne({ deviceId });
-      const cmds = (dev && Array.isArray(dev.pendingCmds)) ? dev.pendingCmds : [];
-      if (cmds.length) {
-        const ids = cmds
-          .filter(c => c && typeof c === 'object' && c.retraitId)
-          .map(c => String(c.retraitId));
-        if (ids.length) extra = await Retrait.find({ _id: { $in: ids } });
-        await Device.updateOne({ _id: dev._id }, { $set: { pendingCmds: [] } });
-        console.log('heartbeat ' + deviceId + ': ' + ids.length + ' commande(s) USSD livree(s)');
-      }
-    } catch (e2) { console.error('heartbeat pendingCmds:', e2.message); }
-
-    // Fusion sans doublon
-    const seen = new Set(pending.map(r => String(r._id)));
-    const commands = pending.concat(extra.filter(r => !seen.has(String(r._id))));
-    res.json({ status: 'ok', commands });
+    /* ------------------------------------------------------------------
+     * ARGENT — deux corrections critiques ici.
+     * ------------------------------------------------------------------
+     * 1) DOUBLE PAIEMENT (course entre deux canaux)
+     *    Cette route lisait Device.pendingCmds puis la vidait en DEUX temps :
+     *        const dev = await Device.findOne(...)      <-- lecture
+     *        ... await Retrait.find(...) ...            <-- fenetre ouverte
+     *        await Device.updateOne(... pendingCmds: [])<-- vidage
+     *    Pendant cette fenetre, GET /api/service/commands (appele par l'APK
+     *    dans le MEME cycle de heartbeat, ligne 129 de GatewayService) pouvait
+     *    lire les MEMES commandes et les vider de son cote. Les deux canaux
+     *    livraient alors le meme retrait : le code USSD partait DEUX FOIS et
+     *    le client etait paye deux fois.
+     *    -> La livraison passe desormais uniquement par
+     *       GET /api/service/commands, dont le findOneAndUpdate lit et vide de
+     *       maniere ATOMIQUE. Un seul canal, aucune course possible.
+     *
+     * 2) RELANCE EN BOUCLE TOUTES LES 30 s
+     *    On renvoyait aussi TOUS les retraits status:'pending', a TOUS les
+     *    telephones, sans filtre d'operateur ni de destinataire. Comme l'APK
+     *    postait son resultat sur /api/retrait/result (route inexistante ->
+     *    404), le statut ne changeait jamais : le meme retrait repartait a
+     *    chaque heartbeat, indefiniment, et sur chaque telephone a la fois.
+     *    -> Plus aucune diffusion ici. La relance est MANUELLE (bouton
+     *       "Relancer" de l'admin), conformement au fonctionnement voulu.
+     * ------------------------------------------------------------------ */
+    res.json({ status: 'ok', commands: [] });
   } catch(e) {
     res.status(500).json({ error: e.message });
   }

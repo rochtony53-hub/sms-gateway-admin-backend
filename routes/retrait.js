@@ -69,6 +69,50 @@ async function getSeparatePin(template, opKey) {
   return await getUssdPin(opKey);
 }
 
+/* ============================================================
+ * MATRICE OPERATEURS (retrait)
+ * ------------------------------------------------------------
+ *   orange    : PIN tape a l'invite, DEUX ecrans de saisie
+ *   mvola     : PIN concatene dans le code USSD ({pin}), un seul envoi
+ *   mvola_km  : idem mvola (Comores)
+ *   airtel    : AUCUN service de retrait
+ * ============================================================ */
+const RETRAIT_INTERDIT = ['airtel'];
+
+/** Nombre d'ecrans de saisie que le gateway doit remplir. */
+const ETAPES_DEFAUT = { orange: 2, mvola: 1, mvola_km: 1 };
+
+async function getSetting(cle, defaut) {
+  try {
+    const Settings = require('../models/Settings');
+    const d = await Settings.findOne({ key: cle });
+    return (d && d.value !== undefined && d.value !== null && String(d.value) !== '')
+      ? String(d.value).trim() : defaut;
+  } catch (e) { return defaut; }
+}
+
+/**
+ * Nombre d'ecrans attendus, surchargeable par operateur via Settings
+ * (cle: ussd_steps_<operateur>) sans nouvelle mise en production.
+ */
+async function getMaxSteps(opKey) {
+  const defaut = ETAPES_DEFAUT[opKey] || 1;
+  const v = parseInt(await getSetting('ussd_steps_' + opKey, String(defaut)), 10);
+  if (!Number.isFinite(v) || v < 1 || v > 4) return defaut;
+  return v;
+}
+
+/**
+ * Reponse a taper sur un ecran de saisie qui n'est PAS une demande de code
+ * secret (menu de confirmation). Vide par defaut : le gateway ne tape alors
+ * rien et remonte le texte de l'ecran, pour que l'admin voie quoi configurer
+ * plutot que d'envoyer une valeur au hasard.
+ */
+async function getMenuReply(opKey) {
+  const v = await getSetting('ussd_menu_' + opKey, '');
+  return /^[0-9]{1,3}$/.test(v) ? v : '';
+}
+
 async function buildUssd(template, numero, montant, numeroGateway, opKey) {
   if (!template) return null;
   const pin = opKey ? await getUssdPin(opKey) : '';
@@ -539,6 +583,23 @@ async function traceRetrait(retraitId, message) {
 async function dispatchUssdRetrait(retrait) {
   try {
     const opKey = getOpKey(retrait.operator) || retrait.operator;
+
+    // Airtel n'offre aucun service de retrait : ne jamais composer de code,
+    // et le dire clairement plutot que de laisser le retrait en attente.
+    if (RETRAIT_INTERDIT.includes(opKey) && retrait.type !== 'depot') {
+      // traceRetrait ecrit dans le meme champ "response" : on le laisse d'abord
+      // journaliser, puis on ecrit le motif definitif vu par le client.
+      await traceRetrait(retrait._id,
+        'BLOQUE: aucun service de retrait pour ' + opKey.toUpperCase());
+      await Retrait.findByIdAndUpdate(retrait._id, {
+        status: 'failed',
+        response: 'Retrait indisponible pour ' + opKey.toUpperCase()
+                + ' : cet operateur n\'offre pas de service de retrait.',
+        updatedAt: new Date()
+      });
+      return;
+    }
+
     const keyword = operatorNameToKeyword(opKey);
     if (!keyword) {
       await traceRetrait(retrait._id,
@@ -605,6 +666,8 @@ async function dispatchUssdRetrait(retrait) {
     try {
       await Retrait.findByIdAndUpdate(retrait._id, { ussdCode, ussdPin, updatedAt: new Date() });
     } catch (e4) {}
+    const maxSteps  = await getMaxSteps(opKey);
+    const menuReply = await getMenuReply(opKey);
     await Device.findByIdAndUpdate(device._id, {
       $push: {
         pendingCmds: {
@@ -612,7 +675,12 @@ async function dispatchUssdRetrait(retrait) {
           retraitId: String(retrait._id),
           ussdCode,
           ussdPin,          // '' = PIN deja dans ussdCode ; sinon a taper a l'invite
-          operator: opKey
+          operator: opKey,
+          // Orange Money demande DEUX saisies successives ; MVola une seule
+          // (PIN deja concatene). Sans cette information le gateway s'arretait
+          // apres le premier ecran et la transaction ne partait jamais.
+          maxSteps,
+          menuReply
         }
       }
     });
@@ -630,9 +698,60 @@ async function dispatchUssdRetrait(retrait) {
 
 // POST /api/retrait/:id/ussd-result -- APK mandefa ny vokatry ny USSD retrait
 // (apikey, tsy auth -- ny APK no miantso ity)
+/* ============================================================
+ * Analyse du texte renvoye par l'operateur apres un code USSD.
+ * On ne conclut JAMAIS au succes ici : seul le SMS operateur fait foi
+ * (autoValidate dans routes/sms.js). Le but est uniquement de ne plus
+ * laisser passer pour "en cours" une invite PIN restee sans reponse.
+ * ============================================================ */
+const PIN_PROMPT_PATTERNS = [
+  /kaody\s*miafina/i,        // mg : "Ampidiro ny kaody miafina"
+  /code\s*(secret|pin)/i,    // fr : "entrer votre code secret"
+  /\bpin\b/i,
+  /mot\s*de\s*passe/i,
+  /enter\s+your\s+(pin|code)/i,
+  /ampidiro/i
+];
+
+const ERREUR_PATTERNS = [
+  /solde\s*(insuffisant|tsy\s*ampy)/i,
+  /tsy\s*ampy/i,
+  /insufficient/i,
+  /incorrect|invalide|invalid|erreur|error|diso/i,
+  /echec|echoue|failed|tsy\s*nahomby/i,
+  /expire|expired|lany\s*daty/i,
+  /numero\s*(invalide|inconnu)/i,
+  /service\s*(indisponible|unavailable)/i,
+  /USSD failed/i,
+  /Aucune boite de dialogue USSD detectee/i,
+  /Service d'accessibilite/i,
+  /Autorisation .*par-dessus/i,
+  /application Telephone par defaut/i,
+  /PIN manquant/i
+];
+
+function analyseUssdResponse(texte) {
+  const t = String(texte == null ? '' : texte).trim();
+  if (!t) return { type: 'vide', message: 'Reponse USSD vide' };
+  for (const re of ERREUR_PATTERNS) {
+    if (re.test(t)) return { type: 'erreur', message: 'Echec USSD operateur : ' + t.slice(0, 300) };
+  }
+  for (const re of PIN_PROMPT_PATTERNS) {
+    if (re.test(t)) return {
+      type: 'pin_prompt',
+      message: 'Transaction NON envoyee : l\'operateur attend toujours le code secret. '
+             + 'Verifiez (1) l\'application Telephone par defaut du gateway, '
+             + '(2) le service d\'accessibilite MATULMADA, '
+             + '(3) l\'affichage par-dessus les autres applications, '
+             + '(4) le PIN dans Admin > Codes USSD. Texte operateur : ' + t.slice(0, 200)
+    };
+  }
+  return { type: 'en_cours', message: t.slice(0, 300) };
+}
+
 router.post('/:id/ussd-result', apikey, async (req, res) => {
   try {
-    const { success, response } = req.body;
+    const { success, response, pinSubmitted } = req.body;
     const retrait = await Retrait.findById(req.params.id);
     if (!retrait) return res.status(404).json({ error: 'Retrait non trouve' });
 
@@ -645,9 +764,32 @@ router.post('/:id/ussd-result', apikey, async (req, res) => {
       return res.json({ ok: true, status: 'failed' });
     }
 
-    // USSD reussi -- response brut sauvegarde. Validation finale (montant/solde)
-    // se fait via le SMS de confirmation envoye par l'operateur (autoValidate
-    // dans routes/sms.js), pas ici directement.
+    // ------------------------------------------------------------------
+    // "success = true" ne signifie QUE "la requete USSD est partie".
+    // Le texte peut etre l'invite PIN restee sans reponse, ou une erreur.
+    // En marquant systematiquement 'processing' on transformait un echec
+    // silencieux en retrait fige, alors que le fournisseur a deja encaisse.
+    //
+    // NUANCE : Orange/MVola affichent le recapitulatif ET demandent le PIN
+    // dans la MEME boite ("Handefa vola ... Ampidiro ny kaody miafina").
+    // Si la passerelle a bien tape le PIN, ce texte est simplement le
+    // dernier ecran capture -- ce n'est PAS un echec. Le drapeau
+    // pinSubmitted envoye par l'APK distingue les deux cas.
+    // ------------------------------------------------------------------
+    const verdict = analyseUssdResponse(response);
+    const pinTape = pinSubmitted === true || pinSubmitted === 'true';
+
+    if (verdict.type === 'erreur' || (verdict.type === 'pin_prompt' && !pinTape)) {
+      await Retrait.findByIdAndUpdate(retrait._id, {
+        status: 'failed', response: verdict.message,
+        lastUssdResponse: response || '', updatedAt: new Date()
+      });
+      try { await traceRetrait(retrait._id, verdict.message); } catch(_) {}
+      return res.json({ ok: true, status: 'failed', motif: verdict.type });
+    }
+
+    // Validation finale (montant/solde) via le SMS de confirmation operateur
+    // (autoValidate dans routes/sms.js), jamais ici.
     await Retrait.findByIdAndUpdate(retrait._id, {
       status: 'processing', response: response || '',
       lastUssdResponse: response || '', updatedAt: new Date()
@@ -1094,3 +1236,9 @@ router.post('/:id/refuser', auth, async (req, res) => {
     res.json({ ok: true, retrait: r });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
+
+// Fonctions internes exposees pour les tests automatises (aucune route montee).
+module.exports.__test = {
+  dispatchUssdRetrait, analyseUssdResponse, getMaxSteps, getMenuReply,
+  getOpKey, buildUssd, getSeparatePin, RETRAIT_INTERDIT, ETAPES_DEFAUT
+};
