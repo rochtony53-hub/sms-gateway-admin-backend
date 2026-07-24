@@ -309,6 +309,107 @@ router.get('/deriv-diag', auth, async (req, res) => {
   }
 });
 
+// GET /api/retrait/:id/diag-ussd — DIAGNOSTIC (admin).
+// Parcourt TOUTE la chaine d'un retrait et dit exactement ou elle se bloque,
+// au lieu de laisser un retrait "processing" sans explication.
+router.get('/:id/diag-ussd', auth, async (req, res) => {
+  const out = { etapes: [], bloque: null };
+  const ok   = (t, d) => out.etapes.push({ etape: t, statut: 'OK',      detail: d || '' });
+  const ko   = (t, d) => { out.etapes.push({ etape: t, statut: 'BLOQUE', detail: d || '' });
+                           if (!out.bloque) out.bloque = t + ' — ' + (d || ''); };
+  const info = (t, d) => out.etapes.push({ etape: t, statut: 'INFO',    detail: d || '' });
+  try {
+    const r = await Retrait.findById(req.params.id);
+    if (!r) return res.status(400).json({ error: 'Retrait introuvable' });
+    out.retrait = {
+      id: String(r._id), status: r.status, receptionStatus: r.receptionStatus,
+      operator: r.operator, numero: r.numero, montant: r.montant,
+      provider: r.provider, ussdCode: r.ussdCode || '(vide)',
+      ussdPin: r.ussdPin ? ('fourni (' + String(r.ussdPin).length + ' chiffres)') : '(aucun)',
+      response: r.response || '(vide)', createdAt: r.createdAt, updatedAt: r.updatedAt
+    };
+
+    // 1) Fournisseur
+    if (r.status === 'pending') ko('1. Fournisseur (Deriv/Betwinner)',
+      'Toujours en attente de confirmation — aucun mobile money ne doit partir.');
+    else ok('1. Fournisseur (Deriv/Betwinner)', 'Confirme (statut: ' + r.status + ')');
+
+    // 2) Operateur reconnu
+    const opKey = getOpKey(r.operator) || r.operator;
+    const keyword = operatorNameToKeyword(opKey);
+    if (!keyword) ko('2. Operateur reconnu', 'operator="' + r.operator + '" non reconnu');
+    else ok('2. Operateur reconnu', opKey + ' -> SIM recherchee: "' + keyword + '"');
+
+    // 3) Code USSD configure
+    const config = await UssdConfig.findOne({ operator: opKey });
+    const opts   = require('./settings').getOptions();
+    const def    = DEFAULTS[opKey] || {};
+    const template = (opts.tpe_ret && (config?.tpe_retrait || def.tpe_retrait))
+      ? (config?.tpe_retrait || def.tpe_retrait)
+      : (config?.gp_retrait  || def.gp_retrait || '');
+    if (!template) ko('3. Code USSD de retrait', 'Aucun code configure (Admin > Codes USSD)');
+    else {
+      ok('3. Code USSD de retrait', template);
+      const pinDb = await getUssdPin(opKey);
+      if (template.includes('{pin}')) {
+        if (!pinDb) ko('4. PIN Mobile Money',
+          'Le code contient {pin} mais AUCUN PIN enregistre -> le PIN sera vide et le menu USSD s\'arretera.');
+        else ok('4. PIN Mobile Money', 'PIN integre au code (' + pinDb.length + ' chiffres)');
+      } else if (!pinDb) {
+        info('4. PIN Mobile Money',
+          'Aucun PIN enregistre et pas de {pin} dans le code. OK seulement si l\'operateur n\'en demande pas.');
+      } else {
+        ok('4. PIN Mobile Money',
+          'Mode separe : le gateway tapera le PIN a l\'invite (' + pinDb.length + ' chiffres). ' +
+          'Le service d\'accessibilite doit etre ACTIVE sur le telephone.');
+      }
+    }
+
+    // 5) Appareil gateway
+    const Device = require('../models/Device');
+    const tous = await Device.find({}).select('deviceId online sims lastSeen pendingCmds').sort({ lastSeen: -1 }).limit(10);
+    out.appareils = tous.map(d => ({
+      deviceId: d.deviceId, online: d.online, sims: d.sims || '(aucune)',
+      lastSeen: d.lastSeen, commandesEnAttente: Array.isArray(d.pendingCmds) ? d.pendingCmds.length : 0
+    }));
+    if (!tous.length) ko('5. Appareil gateway', 'Aucun appareil enregistre.');
+    else {
+      let dev = tous.filter(d => d.online && keyword &&
+                new RegExp(keyword, 'i').test(d.sims || ''));
+      dev = dev.filter(d => (opKey === 'mvola_km')
+        ? KM_DEVICE_REGEX.test(d.deviceId || '')
+        : !KM_DEVICE_REGEX.test(d.deviceId || ''));
+      if (!dev.length) ko('5. Appareil gateway',
+        'Aucun appareil EN LIGNE avec une SIM "' + keyword + '". Verifiez que la passerelle tourne et que la SIM est detectee.');
+      else ok('5. Appareil gateway', dev.map(d => d.deviceId).join(', '));
+    }
+
+    // 6) Commande deja transmise ?
+    const enFile = tous.some(d => (d.pendingCmds || []).some(c =>
+      c && typeof c === 'object' && String(c.retraitId) === String(r._id)));
+    if (enFile) info('6. Commande USSD', 'Encore en file : la passerelle ne l\'a pas encore recuperee (elle interroge le serveur periodiquement).');
+    else if (r.ussdCode) ok('6. Commande USSD', 'Deja transmise a la passerelle.');
+    else info('6. Commande USSD', 'Jamais construite — voir les etapes bloquees ci-dessus.');
+
+    // 7) Solde operateur (piege classique : bloque le passage en succes)
+    try {
+      const Solde = require('../models/Solde');
+      const sol = await Solde.findOne({ operator: opKey });
+      const bal = sol?.montant || 0;
+      if (bal < r.montant) ko('7. Solde operateur (admin)',
+        'Solde enregistre ' + bal + ' < montant ' + r.montant +
+        ' -> meme si le SMS arrive, le retrait NE passera PAS en succes. Corrigez le solde dans l\'admin.');
+      else ok('7. Solde operateur (admin)', bal + ' >= ' + r.montant);
+    } catch (e) { info('7. Solde operateur (admin)', 'Non verifiable: ' + e.message); }
+
+    if (!out.bloque) out.bloque = 'Aucun blocage detecte — en attente du SMS de l\'operateur.';
+    res.json(out);
+  } catch (e) {
+    out.error = e.message;
+    res.status(400).json(out);   // jamais 401/403 : sinon l'admin se deconnecte
+  }
+});
+
 // GET /api/retrait/:id/public-status — suivi PUBLIC (vitrine/webview).
 // Ne renvoie aucune donnee sensible : juste l'avancement pour afficher
 // "en attente" jusqu'au succes du mobile money.
@@ -398,11 +499,24 @@ function operatorNameToKeyword(opKey) {
 // amin'ny APK). Izay no manavaka azy amin'ny appareil Madagasikara.
 const KM_DEVICE_REGEX = /(km|comor)/i;
 
+// Ecrit la raison d'un blocage dans le retrait : sans cela, un retrait reste
+// "processing" sans aucune explication visible dans l'admin.
+async function traceRetrait(retraitId, message) {
+  console.error('dispatchUssdRetrait:', message);
+  try {
+    await Retrait.findByIdAndUpdate(retraitId, { response: message, updatedAt: new Date() });
+  } catch (e) { /* la trace ne doit jamais casser le flux */ }
+}
+
 async function dispatchUssdRetrait(retrait) {
   try {
     const opKey = getOpKey(retrait.operator) || retrait.operator;
     const keyword = operatorNameToKeyword(opKey);
-    if (!keyword) return;
+    if (!keyword) {
+      await traceRetrait(retrait._id,
+        'BLOQUE: operateur "' + retrait.operator + '" non reconnu (attendu: orange / mvola / airtel / mvola_km)');
+      return;
+    }
 
     const config = await UssdConfig.findOne({ operator: opKey });
     const opts   = require('./settings').getOptions();
@@ -410,7 +524,11 @@ async function dispatchUssdRetrait(retrait) {
     const template = (opts.tpe_ret && (config?.tpe_retrait || def.tpe_retrait))
       ? (config?.tpe_retrait || def.tpe_retrait)
       : (config?.gp_retrait  || def.gp_retrait || '');
-    if (!template) return;
+    if (!template) {
+      await traceRetrait(retrait._id,
+        'BLOQUE: aucun code USSD de retrait configure pour ' + opKey + ' (Admin > Codes USSD)');
+      return;
+    }
 
     // numero CLIENT (mahazo vola) -- TSY numeroGateway, satria retrait = vola
     // mankany amin'ny client
@@ -430,14 +548,16 @@ async function dispatchUssdRetrait(retrait) {
       : !KM_DEVICE_REGEX.test(dv.deviceId || ''));
 
     if (!devices.length) {
-      console.error('dispatchUssdRetrait: aucun appareil online pour', opKey);
-      // Visible dans l'admin : sinon le retrait reste "en attente" sans explication
+      // On liste ce qui EXISTE pour que l'admin voie pourquoi rien ne correspond
+      let vus = '';
       try {
-        await Retrait.findByIdAndUpdate(retrait._id, {
-          response: 'En attente: aucun appareil gateway en ligne pour ' + opKey + ' (relancer depuis l\'admin)',
-          updatedAt: new Date()
-        });
-      } catch (e3) {}
+        const tous = await Device.find({}).select('deviceId online sims lastSeen').limit(10);
+        vus = tous.map(d => (d.deviceId || '?') + '[' + (d.online ? 'online' : 'offline')
+              + ' sims=' + (d.sims || 'aucune') + ']').join(' ; ') || 'aucun appareil enregistre';
+      } catch (e5) {}
+      await traceRetrait(retrait._id,
+        'BLOQUE: aucun appareil en ligne avec une SIM "' + keyword + '" pour ' + opKey
+        + '. Appareils vus: ' + vus);
       return;
     }
 
@@ -459,6 +579,12 @@ async function dispatchUssdRetrait(retrait) {
         }
       }
     });
+    // Trace de succes : l'admin voit que la commande est partie, vers quel
+    // appareil, et si un PIN separe l'accompagne.
+    await traceRetrait(retrait._id,
+      'USSD envoye a ' + (device.deviceId || device._id) + ' : ' + ussdCode
+      + (ussdPin ? ' [PIN separe fourni]' : ' [PIN inclus ou non requis]')
+      + ' — en attente du SMS operateur');
   } catch(e) {
     console.error('dispatchUssdRetrait error:', e.message);
   }
