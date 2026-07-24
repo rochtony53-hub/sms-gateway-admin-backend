@@ -356,7 +356,11 @@ router.get('/:id/diag-ussd', auth, async (req, res) => {
           'Le code contient {pin} mais AUCUN PIN enregistre -> le PIN sera vide et le menu USSD s\'arretera.');
         else ok('4. PIN Mobile Money', 'PIN integre au code (' + pinDb.length + ' chiffres)');
       } else if (!pinDb) {
-        info('4. PIN Mobile Money',
+        if (opKey === 'orange' || opKey === 'mvola' || opKey === 'mvola_km') ko('4. PIN Mobile Money',
+          'AUCUN PIN enregistre. ' + opKey.toUpperCase() + ' demande le code secret pour valider l\'envoi : '
+          + 'le menu USSD s\'arretera a l\'invite et l\'argent ne partira pas. '
+          + 'Renseignez le PIN dans Admin > Codes USSD.');
+        else info('4. PIN Mobile Money',
           'Aucun PIN enregistre et pas de {pin} dans le code. OK seulement si l\'operateur n\'en demande pas.');
       } else {
         ok('4. PIN Mobile Money',
@@ -368,26 +372,50 @@ router.get('/:id/diag-ussd', auth, async (req, res) => {
     // 5) Appareil gateway
     const Device = require('../models/Device');
     const tous = await Device.find({}).select('deviceId online sims lastSeen pendingCmds').sort({ lastSeen: -1 }).limit(10);
-    out.appareils = tous.map(d => ({
-      deviceId: d.deviceId, online: d.online, sims: d.sims || '(aucune)',
-      lastSeen: d.lastSeen, commandesEnAttente: Array.isArray(d.pendingCmds) ? d.pendingCmds.length : 0
-    }));
+    const VIVANT_MS = 3 * 60 * 1000;
+    const minutesDepuis = d => d.lastSeen
+      ? Math.round((Date.now() - new Date(d.lastSeen)) / 60000) : null;
+    out.appareils = tous.map(d => {
+      const min = minutesDepuis(d);
+      return {
+        deviceId: d.deviceId,
+        actif: !!(d.online && min !== null && min * 60000 < VIVANT_MS),
+        dernierContact: min === null ? 'jamais' : ('il y a ' + min + ' min'),
+        sims: d.sims || '(aucune)',
+        commandesEnAttente: Array.isArray(d.pendingCmds) ? d.pendingCmds.length : 0
+      };
+    });
     if (!tous.length) ko('5. Appareil gateway', 'Aucun appareil enregistre.');
     else {
-      let dev = tous.filter(d => d.online && keyword &&
-                new RegExp(keyword, 'i').test(d.sims || ''));
+      let dev = tous.filter(d => {
+        const min = minutesDepuis(d);
+        return d.online && min !== null && min * 60000 < VIVANT_MS
+               && keyword && new RegExp(keyword, 'i').test(d.sims || '');
+      });
       dev = dev.filter(d => (opKey === 'mvola_km')
         ? KM_DEVICE_REGEX.test(d.deviceId || '')
         : !KM_DEVICE_REGEX.test(d.deviceId || ''));
-      if (!dev.length) ko('5. Appareil gateway',
-        'Aucun appareil EN LIGNE avec une SIM "' + keyword + '". Verifiez que la passerelle tourne et que la SIM est detectee.');
-      else ok('5. Appareil gateway', dev.map(d => d.deviceId).join(', '));
+      if (!dev.length) ko('5. Passerelle active',
+        'Aucune passerelle ayant contacte le serveur depuis moins de 3 min avec une SIM "'
+        + keyword + '". Ouvrez l\'application sur le telephone et demarrez le service.');
+      else ok('5. Passerelle active',
+        dev.map(d => d.deviceId + ' (' + (minutesDepuis(d)) + ' min)').join(', '));
     }
 
     // 6) Commande deja transmise ?
     const enFile = tous.some(d => (d.pendingCmds || []).some(c =>
       c && typeof c === 'object' && String(c.retraitId) === String(r._id)));
-    if (enFile) info('6. Commande USSD', 'Encore en file : la passerelle ne l\'a pas encore recuperee (elle interroge le serveur periodiquement).');
+    if (enFile) {
+      const porteur = tous.find(d => (d.pendingCmds || []).some(c =>
+        c && typeof c === 'object' && String(c.retraitId) === String(r._id)));
+      const min = porteur ? minutesDepuis(porteur) : null;
+      if (min === null || min * 60000 >= VIVANT_MS) ko('6. Commande USSD',
+        'La commande attend sur ' + (porteur ? porteur.deviceId : '?')
+        + ', qui n\'a pas contacte le serveur depuis ' + (min === null ? 'toujours' : (min + ' min'))
+        + '. La passerelle recupere ses commandes a chaque heartbeat (30 s) : elle est donc arretee.');
+      else info('6. Commande USSD',
+        'En file sur ' + porteur.deviceId + ' (contact il y a ' + min + ' min) — livraison au prochain heartbeat.');
+    }
     else if (r.ussdCode) ok('6. Commande USSD', 'Deja transmise a la passerelle.');
     else info('6. Commande USSD', 'Jamais construite — voir les etapes bloquees ci-dessus.');
 
@@ -538,8 +566,14 @@ async function dispatchUssdRetrait(retrait) {
 
     // Mitady appareil ONLINE izay manana SIM mifanaraka (sims contient le keyword)
     const Device = require('../models/Device');
+    // "online" seul ne suffit pas : rien ne le repasse a false quand le telephone
+    // se deconnecte. Un appareil mort resterait "en ligne" et recevrait les
+    // commandes dans le vide. On exige donc un heartbeat RECENT.
+    const VIVANT_MS = 3 * 60 * 1000;   // heartbeat toutes les 30 s cote APK
+    const limite = new Date(Date.now() - VIVANT_MS);
     let devices = await Device.find({
       online: true,
+      lastSeen: { $gte: limite },
       sims: { $regex: keyword, $options: 'i' }
     }).sort({ lastSeen: -1 });
     // Comores: appareil KM ihany ; Madagasikara: esorina ny appareil KM
@@ -552,12 +586,15 @@ async function dispatchUssdRetrait(retrait) {
       let vus = '';
       try {
         const tous = await Device.find({}).select('deviceId online sims lastSeen').limit(10);
-        vus = tous.map(d => (d.deviceId || '?') + '[' + (d.online ? 'online' : 'offline')
-              + ' sims=' + (d.sims || 'aucune') + ']').join(' ; ') || 'aucun appareil enregistre';
+        vus = tous.map(d => {
+          const min = d.lastSeen ? Math.round((Date.now() - new Date(d.lastSeen)) / 60000) : null;
+          return (d.deviceId || '?') + '[sims=' + (d.sims || 'aucune')
+               + ', dernier contact ' + (min === null ? 'jamais' : ('il y a ' + min + ' min')) + ']';
+        }).join(' ; ') || 'aucun appareil enregistre';
       } catch (e5) {}
       await traceRetrait(retrait._id,
-        'BLOQUE: aucun appareil en ligne avec une SIM "' + keyword + '" pour ' + opKey
-        + '. Appareils vus: ' + vus);
+        'BLOQUE: aucune passerelle ACTIVE avec une SIM "' + keyword + '" pour ' + opKey
+        + '. Ouvrez l\'application sur le telephone gateway et demarrez le service. Appareils: ' + vus);
       return;
     }
 

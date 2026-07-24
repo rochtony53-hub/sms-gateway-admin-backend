@@ -49,6 +49,21 @@ router.post('/heartbeat', apikey, async (req, res) => {
   }
 });
 
+// Un appareil qui ne donne plus signe de vie doit repasser "hors ligne" :
+// sinon il reste "en ligne" pour toujours et continue de recevoir des commandes
+// USSD qui ne seront jamais executees (retrait bloque en "processing").
+setInterval(async () => {
+  try {
+    const limite = new Date(Date.now() - 3 * 60 * 1000);
+    const r = await Device.updateMany(
+      { online: true, lastSeen: { $lt: limite } },
+      { $set: { online: false } }
+    );
+    const n = r.modifiedCount || r.nModified || 0;
+    if (n) console.log('Appareils repasses hors ligne (silence > 3 min): ' + n);
+  } catch (e) { console.error('sweeper appareils:', e.message); }
+}, 60 * 1000);
+
 function flexAuth(req, res, next) {
   const key = req.headers['x-api-key'];
   if (key && key === process.env.API_KEY) return next();
