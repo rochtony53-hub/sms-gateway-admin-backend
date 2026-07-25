@@ -108,6 +108,18 @@ async function getMaxSteps(opKey) {
  * rien et remonte le texte de l'ecran, pour que l'admin voie quoi configurer
  * plutot que d'envoyer une valeur au hasard.
  */
+/**
+ * Pause entre deux retraits USSD, en millisecondes (cle: ussd_gap_ms).
+ * Les limites de cadence des operateurs malgaches ne sont pas publiees :
+ * on reste large par defaut (3 s) et on garde la possibilite de ralentir
+ * sans redeployer si un refus lie au rythme est constate.
+ */
+async function getGapMs() {
+  const v = parseInt(await getSetting('ussd_gap_ms', '3000'), 10);
+  if (!Number.isFinite(v) || v < 1000 || v > 60000) return 3000;
+  return v;
+}
+
 async function getMenuReply(opKey) {
   const v = await getSetting('ussd_menu_' + opKey, '');
   return /^[0-9]{1,3}$/.test(v) ? v : '';
@@ -680,7 +692,8 @@ async function dispatchUssdRetrait(retrait) {
           // (PIN deja concatene). Sans cette information le gateway s'arretait
           // apres le premier ecran et la transaction ne partait jamais.
           maxSteps,
-          menuReply
+          menuReply,
+          gapMs: await getGapMs()
         }
       }
     });
@@ -730,9 +743,27 @@ const ERREUR_PATTERNS = [
   /PIN manquant/i
 ];
 
+/* Ecrans confirmant que l'operateur a bien PRIS la transaction.
+ * Cas reel Orange Money : apres le PIN, une derniere boite affiche
+ * "Transfert initie. Vous allez recevoir une confirmation par SMS." suivie d'un
+ * menu de repertoire telephonique. Cette boite contient les mots "1: enregistrer
+ * ... 2: ne pas enregistrer", ce qui faisait tomber la reponse dans les motifs
+ * d'erreur : le retrait passait en 'failed' ALORS QUE LE CLIENT AVAIT RECU SON
+ * ARGENT. Ce test passe donc AVANT les motifs d'erreur. */
+const DEPART_CONFIRME_PATTERNS = [
+  /transfert\s*initi/i,
+  /vous\s*allez\s*recevoir\s*une\s*confirmation/i,
+  /transaction\s*en\s*cours/i,
+  /est\s*r[eé]ussi/i,
+  /nahomby/i
+];
+
 function analyseUssdResponse(texte) {
   const t = String(texte == null ? '' : texte).trim();
   if (!t) return { type: 'vide', message: 'Reponse USSD vide' };
+  for (const re of DEPART_CONFIRME_PATTERNS) {
+    if (re.test(t)) return { type: 'en_cours', message: t.slice(0, 300) };
+  }
   for (const re of ERREUR_PATTERNS) {
     if (re.test(t)) return { type: 'erreur', message: 'Echec USSD operateur : ' + t.slice(0, 300) };
   }
@@ -1240,5 +1271,5 @@ router.post('/:id/refuser', auth, async (req, res) => {
 // Fonctions internes exposees pour les tests automatises (aucune route montee).
 module.exports.__test = {
   dispatchUssdRetrait, analyseUssdResponse, getMaxSteps, getMenuReply,
-  getOpKey, buildUssd, getSeparatePin, RETRAIT_INTERDIT, ETAPES_DEFAUT
+  getOpKey, buildUssd, getSeparatePin, RETRAIT_INTERDIT, ETAPES_DEFAUT, getGapMs
 };
