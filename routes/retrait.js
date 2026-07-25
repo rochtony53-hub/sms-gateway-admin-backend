@@ -758,9 +758,25 @@ const DEPART_CONFIRME_PATTERNS = [
   /nahomby/i
 ];
 
+/* Messages internes de l'APK signifiant "aucun texte operateur n'a pu etre lu".
+ * Ils contiennent le mot "PIN" et tombaient donc dans les motifs d'invite PIN :
+ * combines a pinSubmitted=true, ils passaient a tort en 'processing'. Or ne rien
+ * avoir lu ne prouve RIEN sur le sort de l'argent. */
+const NON_CONFIRME_PATTERNS = [
+  /pas de texte lu/i,
+  /aucun texte/i
+];
+
 function analyseUssdResponse(texte) {
   const t = String(texte == null ? '' : texte).trim();
   if (!t) return { type: 'vide', message: 'Reponse USSD vide' };
+  for (const re of NON_CONFIRME_PATTERNS) {
+    if (re.test(t)) return {
+      type: 'inconnu',
+      message: 'Aucun texte operateur n\'a pu etre lu — transaction NON confirmee. '
+             + 'Verifiez le solde de la SIM et le SMS operateur AVANT toute relance.'
+    };
+  }
   for (const re of DEPART_CONFIRME_PATTERNS) {
     if (re.test(t)) return { type: 'en_cours', message: t.slice(0, 300) };
   }
@@ -777,7 +793,30 @@ function analyseUssdResponse(texte) {
              + '(4) le PIN dans Admin > Codes USSD. Texte operateur : ' + t.slice(0, 200)
     };
   }
-  return { type: 'en_cours', message: t.slice(0, 300) };
+
+  // ------------------------------------------------------------------
+  // LISTE BLANCHE, PAS LISTE NOIRE.
+  // ------------------------------------------------------------------
+  // Regle metier confirmee par l'exploitation : le SEUL dernier ecran qui
+  // signifie "l'argent est parti" est le message de confirmation de
+  // l'operateur. TOUT autre dernier ecran est une anomalie.
+  //
+  // Le code retournait ici 'en_cours' par defaut : un texte inconnu passait
+  // donc en 'processing' et le retrait restait fige pour toujours — exactement
+  // le bug d'origine, sous une autre forme. On inverse : inconnu = anomalie
+  // signalee, visible dans l'admin avec le texte complet.
+  //
+  // Ce choix est sur parce qu'aucune relance automatique n'existe : un
+  // 'failed' est examine par un humain, il ne declenche jamais un second
+  // envoi. Ajouter un operateur = ajouter son message a
+  // DEPART_CONFIRME_PATTERNS, jamais retirer un motif d'erreur.
+  // ------------------------------------------------------------------
+  return {
+    type: 'inconnu',
+    message: 'Dernier ecran USSD non reconnu — transaction NON confirmee. '
+           + 'Verifiez le solde de la SIM et le SMS operateur AVANT toute relance. '
+           + 'Texte : ' + t.slice(0, 300)
+  };
 }
 
 router.post('/:id/ussd-result', apikey, async (req, res) => {
@@ -810,7 +849,10 @@ router.post('/:id/ussd-result', apikey, async (req, res) => {
     const verdict = analyseUssdResponse(response);
     const pinTape = pinSubmitted === true || pinSubmitted === 'true';
 
-    if (verdict.type === 'erreur' || (verdict.type === 'pin_prompt' && !pinTape)) {
+    // 'inconnu' est traite comme une anomalie : mieux vaut un retrait signale
+    // qu'un retrait fige que personne ne regarde.
+    if (verdict.type === 'erreur' || verdict.type === 'inconnu' || verdict.type === 'vide'
+        || (verdict.type === 'pin_prompt' && !pinTape)) {
       await Retrait.findByIdAndUpdate(retrait._id, {
         status: 'failed', response: verdict.message,
         lastUssdResponse: response || '', updatedAt: new Date()
