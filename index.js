@@ -4,8 +4,51 @@ const cors = require('cors');
 require('dotenv').config();
 
 const app = express();
-app.use(cors());
-app.use(express.json());
+
+/* ============================================================
+ * CORS — AVANT : app.use(cors()) autorisait TOUTE origine a appeler l'API.
+ * MAINTENANT : liste blanche via la variable d'environnement CORS_ORIGINS
+ * (origines separees par des virgules).
+ *
+ *   CORS_ORIGINS=https://mon-admin.pages.dev,https://matulmad.com
+ *
+ * Si CORS_ORIGINS est absent, on reste PERMISSIF pour ne pas couper le service
+ * en production par surprise — mais un avertissement est affiche a chaque
+ * demarrage. Definissez-la des que possible.
+ *
+ * A noter : les appels de l'APK et des scripts ne passent pas par CORS (ce
+ * controle ne s'applique qu'aux navigateurs). CORS reduit la surface d'attaque
+ * depuis un site tiers, il ne remplace pas l'authentification.
+ * ============================================================ */
+const ORIGINES = String(process.env.CORS_ORIGINS || '')
+  .split(',').map(o => o.trim()).filter(Boolean);
+
+if (!ORIGINES.length) {
+  console.warn('[SECURITE] CORS_ORIGINS non definie : toutes les origines sont acceptees. '
+             + 'Definissez CORS_ORIGINS pour restreindre l\'acces depuis les navigateurs.');
+  app.use(cors());
+} else {
+  console.log('[SECURITE] CORS limite a : ' + ORIGINES.join(', '));
+  app.use(cors({
+    origin: (origin, cb) => {
+      // Pas d'en-tete Origin = appel hors navigateur (APK, curl) : laisse passer,
+      // l'authentification par cle API ou jeton fait le tri.
+      if (!origin) return cb(null, true);
+      if (ORIGINES.includes(origin)) return cb(null, true);
+      console.warn('[SECURITE] origine refusee : ' + origin);
+      return cb(new Error('Origine non autorisee'));
+    },
+    credentials: true
+  }));
+}
+
+// Render est derriere un proxy : necessaire pour lire la vraie IP du client
+// (sinon toutes les tentatives de connexion semblent venir de la meme adresse
+// et la limitation par IP devient inoperante).
+app.set('trust proxy', 1);
+
+// Limite la taille du corps : evite qu'une requete enorme sature la memoire.
+app.use(express.json({ limit: '1mb' }));
 
 // Routes
 app.use('/api/auth',    require('./routes/auth'));
@@ -24,6 +67,7 @@ app.use('/api/solde',   require('./routes/solde'));
 app.use('/api/deriv',   require('./routes/deriv'));
 app.use('/api/betwinner', require('./routes/betwinner'));
 app.use('/api/alert', require('./routes/alert'));
+app.use('/api/audit', require('./routes/audit'));
 
 app.get('/health', (req, res) => res.json({ status: 'ok', version: '1.1.0', time: new Date().toISOString() }));
 
