@@ -855,15 +855,24 @@ function analyseUssdResponse(texte) {
 
 router.post('/:id/ussd-result', apikey, async (req, res) => {
   try {
-    const { success, response, pinSubmitted } = req.body;
+    // 'response' = texte operateur BRUT (affiche tel quel dans l'admin)
+    // 'motif'    = explication technique de la passerelle (jamais melangee au texte)
+    const { success, response, pinSubmitted, motif } = req.body;
     const retrait = await Retrait.findById(req.params.id);
     if (!retrait) return res.status(404).json({ error: 'Retrait non trouve' });
 
     // FIX: lastUssdResponse -- dernier message USSD voarakitra foana
+    // lastUssdResponse = TOUJOURS le dernier texte operateur brut : c'est ce
+    // que l'admin lit dans la colonne "message flash". L'explication va dans
+    // 'response'. Les melanger rendait le vrai message de l'operateur illisible.
+    const texteBrut = String(response == null ? '' : response).trim();
+
     if (!success) {
       await Retrait.findByIdAndUpdate(retrait._id, {
-        status: 'failed', response: response || 'USSD echec',
-        lastUssdResponse: response || 'USSD echec', updatedAt: new Date()
+        status: 'failed',
+        response: (motif && String(motif).trim()) || texteBrut || 'USSD echec',
+        lastUssdResponse: texteBrut || 'Aucun texte operateur',
+        updatedAt: new Date()
       });
       return res.json({ ok: true, status: 'failed' });
     }
@@ -888,8 +897,10 @@ router.post('/:id/ussd-result', apikey, async (req, res) => {
     if (verdict.type === 'erreur' || verdict.type === 'inconnu' || verdict.type === 'vide'
         || (verdict.type === 'pin_prompt' && !pinTape)) {
       await Retrait.findByIdAndUpdate(retrait._id, {
-        status: 'failed', response: verdict.message,
-        lastUssdResponse: response || '', updatedAt: new Date()
+        status: 'failed',
+        response: verdict.message,
+        lastUssdResponse: texteBrut || 'Aucun texte operateur',
+        updatedAt: new Date()
       });
       try { await traceRetrait(retrait._id, verdict.message); } catch(_) {}
       return res.json({ ok: true, status: 'failed', motif: verdict.type });
@@ -898,8 +909,10 @@ router.post('/:id/ussd-result', apikey, async (req, res) => {
     // Validation finale (montant/solde) via le SMS de confirmation operateur
     // (autoValidate dans routes/sms.js), jamais ici.
     await Retrait.findByIdAndUpdate(retrait._id, {
-      status: 'processing', response: response || '',
-      lastUssdResponse: response || '', updatedAt: new Date()
+      status: 'processing',
+      response: (motif && String(motif).trim()) || texteBrut,
+      lastUssdResponse: texteBrut,
+      updatedAt: new Date()
     });
     res.json({ ok: true, status: 'processing' });
   } catch(e) { res.status(500).json({ error: e.message }); }
