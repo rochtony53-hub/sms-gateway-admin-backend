@@ -727,6 +727,12 @@ const PIN_PROMPT_PATTERNS = [
 ];
 
 const ERREUR_PATTERNS = [
+  // "Votre solde est insuffisant" : le motif d'origine exigeait "solde" et
+  // "insuffisant" COLLES, il ne reconnaissait donc pas la formulation reelle
+  // des operateurs. L'echec etait bien detecte (repli 'inconnu'), mais affiche
+  // comme "ecran non reconnu" au lieu du vrai motif.
+  /solde[^.\n]{0,30}insuffisant/i,
+  /insuffisant[^.\n]{0,30}solde/i,
   /solde\s*(insuffisant|tsy\s*ampy)/i,
   /tsy\s*ampy/i,
   /insufficient/i,

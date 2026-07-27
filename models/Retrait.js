@@ -47,6 +47,10 @@ const retraitSchema = new mongoose.Schema({
     default: 'en_attente'
   },
   // FIX: dernier message USSD brut (rehefa vita ny USSD)
+  // Frais reellement annonces par l'operateur (ils varient : jamais calcules)
+  frais:      { type: Number, default: null },
+  // Solde annonce par l'operateur apres l'operation — fait autorite
+  soldeApres: { type: Number, default: null },
   lastUssdResponse: { type: String, default: '' },
   // FIX: relance automatique isaky 15 min raha erreur
   relanceCount: { type: Number, default: 0 },

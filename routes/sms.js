@@ -94,6 +94,76 @@ async function expireOldRetraits(opKey) {
 //    d. montant exact fa solde tsy azo hamarinina -> "processing" (EN ATTENTE admin)
 // 4. SMS misy template fa TSY mitovy keywords -> "failed" avy hatrany,
 //    admin mahazo mbola valide/refuse manuel.
+/* ============================================================
+ * LECTURE DU SOLDE REEL ANNONCE PAR L'OPERATEUR
+ * ------------------------------------------------------------
+ * Les frais Mobile Money ne sont PAS fixes : ils varient selon le montant et
+ * l'operateur. Les deduire par calcul serait forcement faux tot ou tard, et
+ * l'erreur s'accumulerait a chaque retrait.
+ *
+ * L'operateur annonce lui-meme le solde exact apres l'operation
+ * ("Nouveau solde: 1154626 Ar"). Cette valeur fait autorite : elle inclut deja
+ * les frais, quels qu'ils soient. Quand on parvient a la lire, on ALIGNE le
+ * solde enregistre dessus au lieu de le calculer.
+ *
+ * Si la lecture echoue, on retombe sur l'ancien comportement (decrementer du
+ * montant) : jamais de blocage, seulement une precision moindre.
+ * ============================================================ */
+
+/** Convertit "1 154 626", "1,154,626", "1154626.00" en nombre. */
+function versNombre(brut) {
+  if (brut == null) return null;
+  let t = String(brut).trim();
+  // Separateur decimal a 2 chiffres en fin : on le retire (montants en Ariary)
+  t = t.replace(/[.,](\d{2})\s*$/, '');
+  t = t.replace(/[^0-9]/g, '');
+  if (!t) return null;
+  const n = parseInt(t, 10);
+  return Number.isFinite(n) ? n : null;
+}
+
+const MOTIFS_SOLDE = [
+  /nouveau\s*solde\s*[:=]?\s*([0-9][0-9\s.,]{0,15})/i,
+  /solde\s*(?:actuel|restant|disponible)\s*[:=]?\s*([0-9][0-9\s.,]{0,15})/i,
+  /votre\s*solde\s*est\s*(?:de)?\s*[:=]?\s*([0-9][0-9\s.,]{0,15})/i,
+  /solde\s*[:=]\s*([0-9][0-9\s.,]{0,15})/i,
+  /volanao\s*(?:sisa)?\s*[:=]?\s*([0-9][0-9\s.,]{0,15})/i
+];
+
+/** Solde annonce par l'operateur, ou null si absent/illisible. */
+function lireSoldeAnnonce(message) {
+  const t = String(message == null ? '' : message);
+  // Un message d'echec peut citer un solde : ne pas s'y fier.
+  if (/insuffisant|echou|echec|annul[ée]e/i.test(t)) return null;
+  for (const re of MOTIFS_SOLDE) {
+    const m = t.match(re);
+    if (m) {
+      const n = versNombre(m[1]);
+      // Bornes de securite : une valeur absurde ne doit jamais ecraser le solde.
+      if (n != null && n >= 0 && n < 1e12) return n;
+    }
+  }
+  return null;
+}
+
+const MOTIFS_FRAIS = [
+  /frais\s*[:=]?\s*([0-9][0-9\s.,]{0,10})/i,
+  /sarany\s*[:=]?\s*([0-9][0-9\s.,]{0,10})/i
+];
+
+/** Frais annonces par l'operateur, ou null. */
+function lireFrais(message) {
+  const t = String(message == null ? '' : message);
+  for (const re of MOTIFS_FRAIS) {
+    const m = t.match(re);
+    if (m) {
+      const n = versNombre(m[1]);
+      if (n != null && n >= 0 && n < 1e7) return n;
+    }
+  }
+  return null;
+}
+
 async function autoValidate(operator, message, smsId) {
   const opts = settings.getOptions();
   if (!opts.ret_aut) return;
@@ -192,12 +262,36 @@ async function autoValidate(operator, message, smsId) {
       if (smsId) await Sms.findByIdAndUpdate(smsId, { status: 'processing', retraitId: claimed._id });
       return;
     }
-    await Solde.findOneAndUpdate(
-      { operator: opKey },
-      { $inc: { montant: -claimed.montant, montantOff: -claimed.montant }, updatedAt: new Date() }
-    );
+    const soldeAnnonce = lireSoldeAnnonce(message);
+    const frais        = lireFrais(message);
+
+    if (soldeAnnonce != null) {
+      // L'operateur fait foi : frais inclus, quel que soit leur montant.
+      const ecart = balance - claimed.montant - soldeAnnonce;
+      await Solde.findOneAndUpdate(
+        { operator: opKey },
+        { $set: { montant: soldeAnnonce, montantOff: soldeAnnonce }, updatedAt: new Date() }
+      );
+      if (ecart !== 0) {
+        console.log('solde ' + opKey + ' aligne sur l\'operateur : ' + soldeAnnonce
+                  + ' (ecart absorbe ' + ecart + ', frais annonces '
+                  + (frais == null ? 'non lus' : frais) + ')');
+      }
+    } else {
+      // Repli : ancien comportement. Les frais ne sont alors PAS deduits —
+      // le solde enregistre derivera legerement du solde reel.
+      await Solde.findOneAndUpdate(
+        { operator: opKey },
+        { $inc: { montant: -claimed.montant, montantOff: -claimed.montant }, updatedAt: new Date() }
+      );
+      console.warn('solde ' + opKey + ' : aucun solde annonce lisible dans le SMS, '
+                 + 'frais non deduits');
+    }
+
     await Retrait.findByIdAndUpdate(claimed._id, {
       status: 'success', receptionStatus: 'confirme', lastUssdResponse: message,
+      frais: frais == null ? undefined : frais,
+      soldeApres: soldeAnnonce == null ? undefined : soldeAnnonce,
       locked: false, updatedAt: new Date()
     });
     if (smsId) await Sms.findByIdAndUpdate(smsId, { status: 'matched', retraitId: claimed._id });
@@ -206,11 +300,21 @@ async function autoValidate(operator, message, smsId) {
 
   // DEPOT : vola voaray (solde miakatra amin'ny VOLA TENA VOARAY — tolerance +10%).
   const montantRecu = (typeof mSms === 'number' && mSms) ? mSms : Math.round(claimed.montant);
-  await Solde.findOneAndUpdate(
-    { operator: opKey },
-    { $inc: { montant: montantRecu, montantOff: montantRecu }, updatedAt: new Date() },
-    { upsert: true }
-  );
+  const soldeDepot  = lireSoldeAnnonce(message);
+  if (soldeDepot != null) {
+    // Meme principe qu'au retrait : le solde annonce par l'operateur fait foi.
+    await Solde.findOneAndUpdate(
+      { operator: opKey },
+      { $set: { montant: soldeDepot, montantOff: soldeDepot }, updatedAt: new Date() },
+      { upsert: true }
+    );
+  } else {
+    await Solde.findOneAndUpdate(
+      { operator: opKey },
+      { $inc: { montant: montantRecu, montantOff: montantRecu }, updatedAt: new Date() },
+      { upsert: true }
+    );
+  }
 
   let depotStatus = 'processing';
   let derivErr = '';
@@ -495,3 +599,5 @@ module.exports.parseMontant = parseMontant;
 module.exports.getOpKeySms = getOpKey;
 module.exports.montantDepotOk = montantDepotOk;
 
+// Fonctions internes exposees pour les tests automatises.
+module.exports.__test = { lireSoldeAnnonce, lireFrais, versNombre };
