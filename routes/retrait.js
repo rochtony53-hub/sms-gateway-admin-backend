@@ -751,11 +751,34 @@ const ERREUR_PATTERNS = [
  * d'erreur : le retrait passait en 'failed' ALORS QUE LE CLIENT AVAIT RECU SON
  * ARGENT. Ce test passe donc AVANT les motifs d'erreur. */
 const DEPART_CONFIRME_PATTERNS = [
+  // --- Orange Money ---
   /transfert\s*initi/i,
   /vous\s*allez\s*recevoir\s*une\s*confirmation/i,
-  /transaction\s*en\s*cours/i,
   /est\s*r[eé]ussi/i,
+  // --- MVola / Telma (releve sur telephone) ---
+  // "Votre transaction a reussi, pour enregistrer 0380990983 dans votre
+  //  repertoire MVola, Entrer le nom correspondant ou ignorer :"
+  /transaction\s+a\s+r[eé]ussi/i,
+  /r[eé]pertoire\s+mvola/i,
+  // --- commun ---
+  /transaction\s*en\s*cours/i,
   /nahomby/i
+];
+
+/* Formulations d'ECHEC contenant malgre tout un mot de succes.
+ * Exemple : "la transaction n'a pas reussi" contient "reussi".
+ * Ces motifs sont testes AVANT la liste de confirmation : sans cela, un echec
+ * serait pris pour un succes et le retrait passerait en 'processing' alors que
+ * le client n'a rien recu.
+ * NE JAMAIS y mettre "annul" : les libelles des boutons ("ANNULER | ENVOYER")
+ * font partie du texte lu a l'ecran et declencheraient un faux echec. */
+const ECHEC_MALGRE_MOT_POSITIF = [
+  /n'?\s*a\s+pas\s+r[eé]ussi/i,
+  /pas\s+r[eé]ussi/i,
+  /non\s+r[eé]ussi/i,
+  /n'?\s*a\s+pas\s+about/i,
+  /[eé]chou[eé]?/i,
+  /tsy\s*nahomby/i
 ];
 
 /* Messages internes de l'APK signifiant "aucun texte operateur n'a pu etre lu".
@@ -776,6 +799,11 @@ function analyseUssdResponse(texte) {
       message: 'Aucun texte operateur n\'a pu etre lu — transaction NON confirmee. '
              + 'Verifiez le solde de la SIM et le SMS operateur AVANT toute relance.'
     };
+  }
+  // Un echec formule avec un mot positif doit etre reconnu AVANT la confirmation.
+  for (const re of ECHEC_MALGRE_MOT_POSITIF) {
+    if (re.test(t))
+      return { type: 'erreur', message: 'Echec USSD operateur : ' + t.slice(0, 300) };
   }
   for (const re of DEPART_CONFIRME_PATTERNS) {
     if (re.test(t)) return { type: 'en_cours', message: t.slice(0, 300) };
