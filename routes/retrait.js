@@ -34,16 +34,49 @@ async function getUssdCode(operator, type) {
 
   if (type === 'depot') {
     // tpe_depot ON → TPE, sinon GP
-    template = (opts.tpe_depot && (config?.tpe_depot || def.tpe_depot))
+    template = (opts.tpe_depot && templateUtilisable(config?.tpe_depot || def.tpe_depot, 'depot'))
       ? (config?.tpe_depot || def.tpe_depot)
       : (config?.gp_depot  || def.gp_depot || '');
   } else {
     // tpe_ret ON → TPE, sinon GP
-    template = (opts.tpe_ret && (config?.tpe_retrait || def.tpe_retrait))
+    template = (opts.tpe_ret && templateUtilisable(config?.tpe_retrait || def.tpe_retrait, 'retrait'))
       ? (config?.tpe_retrait || def.tpe_retrait)
       : (config?.gp_retrait  || def.gp_retrait || '');
   }
   return template || null;
+}
+
+/* ============================================================
+ * VALIDATION DES MODELES USSD  (protection TPE)
+ * ------------------------------------------------------------
+ * Les champs TPE du panel sont pre-remplis avec des valeurs INCOMPLETES
+ * ("#144#", "#145*") qui ne contiennent aucun marqueur {numero}/{montant}.
+ * Enregistrees telles quelles, elles produisaient un code USSD qui ouvre
+ * simplement le MENU de l'operateur au lieu d'executer la transaction.
+ *
+ * Le danger va plus loin qu'une transaction ratee : en mode retrait, le
+ * service d'accessibilite est arme et aurait tape le code PIN dans le
+ * premier champ de saisie du menu — donc a un endroit imprevisible.
+ *
+ * On refuse donc tout modele TPE incomplet et on retombe sur le Grand
+ * Public, qui est connu pour fonctionner. Le refus est journalise pour
+ * que l'administrateur sache exactement quoi corriger.
+ * ============================================================ */
+function templateUtilisable(template, type) {
+  const t = String(template == null ? '' : template).trim();
+  if (!t) return false;
+
+  // Un modele exploitable doit au minimum savoir OU envoyer et COMBIEN.
+  const aMontant = t.includes('{montant}');
+  const aCible   = t.includes('{numero}') || t.includes('{numeroGateway}');
+
+  if (!aMontant || !aCible) {
+    console.warn('modele USSD ' + type + ' ignore (incomplet, il manque '
+      + (!aCible ? '{numero} ' : '') + (!aMontant ? '{montant}' : '')
+      + ') : "' + t + '" — repli sur le Grand Public');
+    return false;
+  }
+  return true;
 }
 
 function genSession(){ return 'S'+Date.now().toString(36).toUpperCase()+Math.floor(Math.random()*9000+1000); }
@@ -400,7 +433,9 @@ router.get('/:id/diag-ussd', auth, async (req, res) => {
     const config = await UssdConfig.findOne({ operator: opKey });
     const opts   = require('./settings').getOptions();
     const def    = DEFAULTS[opKey] || {};
-    const template = (opts.tpe_ret && (config?.tpe_retrait || def.tpe_retrait))
+    // Meme validation que dans getUssdCode : un modele TPE incomplet ne doit
+    // jamais etre compose, surtout ici ou le PIN est arme.
+    const template = (opts.tpe_ret && templateUtilisable(config?.tpe_retrait || def.tpe_retrait, 'retrait'))
       ? (config?.tpe_retrait || def.tpe_retrait)
       : (config?.gp_retrait  || def.gp_retrait || '');
     if (!template) ko('3. Code USSD de retrait', 'Aucun code configure (Admin > Codes USSD)');
@@ -622,7 +657,9 @@ async function dispatchUssdRetrait(retrait) {
     const config = await UssdConfig.findOne({ operator: opKey });
     const opts   = require('./settings').getOptions();
     const def    = DEFAULTS[opKey] || {};
-    const template = (opts.tpe_ret && (config?.tpe_retrait || def.tpe_retrait))
+    // Meme validation que dans getUssdCode : un modele TPE incomplet ne doit
+    // jamais etre compose, surtout ici ou le PIN est arme.
+    const template = (opts.tpe_ret && templateUtilisable(config?.tpe_retrait || def.tpe_retrait, 'retrait'))
       ? (config?.tpe_retrait || def.tpe_retrait)
       : (config?.gp_retrait  || def.gp_retrait || '');
     if (!template) {
@@ -1395,5 +1432,6 @@ router.post('/:id/refuser', auth, async (req, res) => {
 module.exports.__test = {
   dispatchUssdRetrait, analyseUssdResponse, getMaxSteps, getMenuReply,
   getOpKey, buildUssd, getSeparatePin, RETRAIT_INTERDIT, ETAPES_DEFAUT, getGapMs,
+  templateUtilisable,
   lireSoldeDansEchec
 };
