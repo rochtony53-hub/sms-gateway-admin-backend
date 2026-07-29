@@ -796,6 +796,22 @@ const NON_CONFIRME_PATTERNS = [
   /aucun texte/i
 ];
 
+/* Solde annonce par l'operateur DANS un message d'echec.
+ * Cas reel MVola : "Votre solde MVola est insuffisant. Votre solde est de
+ * 5 692Ar. ..." — l'operateur donne le solde EXACT. Si le solde enregistre
+ * differe, c'est justement pourquoi le retrait a ete tente a tort. On le
+ * recale : sans cela, les tentatives echouent en boucle sur une valeur fausse.
+ */
+function lireSoldeDansEchec(texte) {
+  const t = String(texte == null ? '' : texte);
+  const m = t.match(/votre\s*solde\s*(?:[a-z]+\s*)?est\s*(?:de)?\s*[:=]?\s*([0-9][0-9\s.,]{0,15})/i);
+  if (!m) return null;
+  let brut = m[1].replace(/[.,](\d{2})\s*$/, '').replace(/[^0-9]/g, '');
+  if (!brut) return null;
+  const n = parseInt(brut, 10);
+  return (Number.isFinite(n) && n >= 0 && n < 1e12) ? n : null;
+}
+
 function analyseUssdResponse(texte) {
   const t = String(texte == null ? '' : texte).trim();
   if (!t) return { type: 'vide', message: 'Reponse USSD vide' };
@@ -903,6 +919,24 @@ router.post('/:id/ussd-result', apikey, async (req, res) => {
         updatedAt: new Date()
       });
       try { await traceRetrait(retrait._id, verdict.message); } catch(_) {}
+
+      // Recalage du solde quand l'operateur l'annonce dans son refus.
+      const soldeReel = lireSoldeDansEchec(texteBrut);
+      if (soldeReel != null) {
+        try {
+          const opKey = getOpKey(retrait.operator) || retrait.operator;
+          const Solde = require('../models/Solde');
+          const avant = await Solde.findOne({ operator: opKey });
+          await Solde.findOneAndUpdate(
+            { operator: opKey },
+            { $set: { montant: soldeReel, montantOff: soldeReel }, updatedAt: new Date() },
+            { upsert: true }
+          );
+          console.log('solde ' + opKey + ' recale d\'apres le refus operateur : '
+                    + (avant ? avant.montant : '?') + ' -> ' + soldeReel);
+        } catch (e) { console.error('recalage solde:', e.message); }
+      }
+
       return res.json({ ok: true, status: 'failed', motif: verdict.type });
     }
 
@@ -1360,5 +1394,6 @@ router.post('/:id/refuser', auth, async (req, res) => {
 // Fonctions internes exposees pour les tests automatises (aucune route montee).
 module.exports.__test = {
   dispatchUssdRetrait, analyseUssdResponse, getMaxSteps, getMenuReply,
-  getOpKey, buildUssd, getSeparatePin, RETRAIT_INTERDIT, ETAPES_DEFAUT, getGapMs
+  getOpKey, buildUssd, getSeparatePin, RETRAIT_INTERDIT, ETAPES_DEFAUT, getGapMs,
+  lireSoldeDansEchec
 };
