@@ -34,12 +34,12 @@ async function getUssdCode(operator, type) {
 
   if (type === 'depot') {
     // tpe_depot ON → TPE, sinon GP
-    template = (opts.tpe_depot && templateUtilisable(config?.tpe_depot || def.tpe_depot, 'depot'))
+    template = (opts.tpe_depot && templateUtilisable(config?.tpe_depot || def.tpe_depot, 'depot', key))
       ? (config?.tpe_depot || def.tpe_depot)
       : (config?.gp_depot  || def.gp_depot || '');
   } else {
     // tpe_ret ON → TPE, sinon GP
-    template = (opts.tpe_ret && templateUtilisable(config?.tpe_retrait || def.tpe_retrait, 'retrait'))
+    template = (opts.tpe_ret && templateUtilisable(config?.tpe_retrait || def.tpe_retrait, 'retrait', key))
       ? (config?.tpe_retrait || def.tpe_retrait)
       : (config?.gp_retrait  || def.gp_retrait || '');
   }
@@ -62,9 +62,53 @@ async function getUssdCode(operator, type) {
  * Public, qui est connu pour fonctionner. Le refus est journalise pour
  * que l'administrateur sache exactement quoi corriger.
  * ============================================================ */
-function templateUtilisable(template, type) {
+/* ============================================================
+ * MODE DE SAISIE DU PIN, PAR OPERATEUR
+ * ------------------------------------------------------------
+ * Regle constatee sur le terrain, identique en Grand Public ET en TPE :
+ *
+ *   orange    : le PIN est demande A PART, dans une boite de dialogue.
+ *               Le modele USSD ne doit donc PAS contenir {pin}.
+ *   mvola     : tout part en une seule fois, PIN compris.
+ *               Le modele DOIT contenir {pin}.
+ *   mvola_km  : comme mvola.
+ *
+ * Un modele mal configure ne provoque pas une simple erreur, il bloque :
+ *   - Orange avec {pin}  -> le PIN part dans le code, l'operateur affiche
+ *     quand meme son invite, personne n'y repond, l'ecran reste fige.
+ *   - MVola sans {pin}   -> la passerelle arme la saisie interactive et
+ *     attend une invite de PIN qui n'arrivera jamais.
+ * On refuse donc le modele et on le signale, plutot que de composer.
+ * ============================================================ */
+const PIN_DANS_LE_CODE = { orange: false, mvola: true, mvola_km: true };
+
+/**
+ * @returns null si le modele est coherent, sinon le motif du refus.
+ */
+function verifierModePin(template, opKey) {
+  if (!template || !(opKey in PIN_DANS_LE_CODE)) return null;
+  const attendu = PIN_DANS_LE_CODE[opKey];
+  const present = String(template).includes('{pin}');
+  if (attendu && !present)
+    return 'le modele ' + opKey + ' doit contenir {pin} (le PIN part avec le code)';
+  if (!attendu && present)
+    return 'le modele ' + opKey + ' ne doit PAS contenir {pin} '
+         + '(le PIN est saisi a part dans la boite de dialogue)';
+  return null;
+}
+
+function templateUtilisable(template, type, opKey) {
   const t = String(template == null ? '' : template).trim();
   if (!t) return false;
+
+  if (opKey) {
+    const souci = verifierModePin(t, opKey);
+    if (souci) {
+      console.warn('modele USSD ' + type + ' ignore : ' + souci + ' — "' + t
+                 + '" — repli sur l\'autre canal');
+      return false;
+    }
+  }
 
   // Un modele exploitable doit au minimum savoir OU envoyer et COMBIEN.
   const aMontant = t.includes('{montant}');
@@ -435,7 +479,7 @@ router.get('/:id/diag-ussd', auth, async (req, res) => {
     const def    = DEFAULTS[opKey] || {};
     // Meme validation que dans getUssdCode : un modele TPE incomplet ne doit
     // jamais etre compose, surtout ici ou le PIN est arme.
-    const template = (opts.tpe_ret && templateUtilisable(config?.tpe_retrait || def.tpe_retrait, 'retrait'))
+    const template = (opts.tpe_ret && templateUtilisable(config?.tpe_retrait || def.tpe_retrait, 'retrait', opKey))
       ? (config?.tpe_retrait || def.tpe_retrait)
       : (config?.gp_retrait  || def.gp_retrait || '');
     if (!template) ko('3. Code USSD de retrait', 'Aucun code configure (Admin > Codes USSD)');
@@ -659,7 +703,7 @@ async function dispatchUssdRetrait(retrait) {
     const def    = DEFAULTS[opKey] || {};
     // Meme validation que dans getUssdCode : un modele TPE incomplet ne doit
     // jamais etre compose, surtout ici ou le PIN est arme.
-    const template = (opts.tpe_ret && templateUtilisable(config?.tpe_retrait || def.tpe_retrait, 'retrait'))
+    const template = (opts.tpe_ret && templateUtilisable(config?.tpe_retrait || def.tpe_retrait, 'retrait', opKey))
       ? (config?.tpe_retrait || def.tpe_retrait)
       : (config?.gp_retrait  || def.gp_retrait || '');
     if (!template) {
@@ -1432,6 +1476,6 @@ router.post('/:id/refuser', auth, async (req, res) => {
 module.exports.__test = {
   dispatchUssdRetrait, analyseUssdResponse, getMaxSteps, getMenuReply,
   getOpKey, buildUssd, getSeparatePin, RETRAIT_INTERDIT, ETAPES_DEFAUT, getGapMs,
-  templateUtilisable,
+  templateUtilisable, verifierModePin, PIN_DANS_LE_CODE,
   lireSoldeDansEchec
 };
