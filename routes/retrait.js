@@ -1548,5 +1548,5 @@ module.exports.__test = {
   dispatchUssdRetrait, analyseUssdResponse, getMaxSteps, getMenuReply,
   getOpKey, buildUssd, getSeparatePin, RETRAIT_INTERDIT, ETAPES_DEFAUT, getGapMs,
   templateUtilisable, verifierModePin, PIN_DANS_LE_CODE,
-  lireSoldeDansEchec
+  lireSoldeDansEchec, autoPollDerivWithdrawRest
 };
