@@ -7,6 +7,9 @@ const soldeSchema = new mongoose.Schema({
   baseAmount:      { type: Number, default: 0 },     // solde réel via USSD check farany
   baseTimestamp:   { type: Date,   default: null },  // date du dernier check USSD
   baseRawResponse: { type: String, default: '' },    // texte brut réponse USSD
+  // Somme des mouvements depuis baseTimestamp. Remis a 0 a chaque constat reel :
+  // c'est ce qui empeche toute derive de s'accumuler.
+  delta:           { type: Number, default: 0 },    // texte brut réponse USSD
   updatedAt:       { type: Date, default: Date.now }
 });
 

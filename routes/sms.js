@@ -342,27 +342,17 @@ async function autoValidate(operator, message, smsId) {
     const soldeAnnonce = lireSoldeAnnonce(message);
     const frais        = lireFrais(message);
 
+    const svcSolde = require('./soldeService');
     if (soldeAnnonce != null) {
-      // L'operateur fait foi : frais inclus, quel que soit leur montant.
-      const ecart = balance - claimed.montant - soldeAnnonce;
-      await Solde.findOneAndUpdate(
-        { operator: opKey },
-        { $set: { montant: soldeAnnonce, montantOff: soldeAnnonce }, updatedAt: new Date() }
-      );
-      if (ecart !== 0) {
-        console.log('solde ' + opKey + ' aligne sur l\'operateur : ' + soldeAnnonce
-                  + ' (ecart absorbe ' + ecart + ', frais annonces '
-                  + (frais == null ? 'non lus' : frais) + ')');
-      }
+      // Le SMS annonce le solde EXACT apres operation : frais inclus, quel
+      // que soit leur montant. C'est un constat reel, il fait autorite.
+      await svcSolde.soldeVerifie(opKey, soldeAnnonce, 'sms retrait', message);
     } else {
-      // Repli : ancien comportement. Les frais ne sont alors PAS deduits —
-      // le solde enregistre derivera legerement du solde reel.
-      await Solde.findOneAndUpdate(
-        { operator: opKey },
-        { $inc: { montant: -claimed.montant, montantOff: -claimed.montant }, updatedAt: new Date() }
-      );
-      console.warn('solde ' + opKey + ' : aucun solde annonce lisible dans le SMS, '
-                 + 'frais non deduits');
+      // Aucun solde lisible : simple mouvement estime. Les frais ne sont pas
+      // connus, l'ecart sera absorbe a la prochaine consultation de solde.
+      await svcSolde.soldeMouvement(opKey, -claimed.montant, 'retrait valide par SMS');
+      console.warn('solde ' + opKey + ' : aucun solde annonce dans le SMS, '
+                 + 'frais non deduits — sera recale au prochain controle');
     }
 
     await Retrait.findByIdAndUpdate(claimed._id, {
@@ -377,20 +367,12 @@ async function autoValidate(operator, message, smsId) {
 
   // DEPOT : vola voaray (solde miakatra amin'ny VOLA TENA VOARAY — tolerance +10%).
   const montantRecu = (typeof mSms === 'number' && mSms) ? mSms : Math.round(claimed.montant);
-  const soldeDepot  = lireSoldeAnnonce(message);
+  const soldeDepot = lireSoldeAnnonce(message);
+  const svc = require('./soldeService');
   if (soldeDepot != null) {
-    // Meme principe qu'au retrait : le solde annonce par l'operateur fait foi.
-    await Solde.findOneAndUpdate(
-      { operator: opKey },
-      { $set: { montant: soldeDepot, montantOff: soldeDepot }, updatedAt: new Date() },
-      { upsert: true }
-    );
+    await svc.soldeVerifie(opKey, soldeDepot, 'sms depot', message);
   } else {
-    await Solde.findOneAndUpdate(
-      { operator: opKey },
-      { $inc: { montant: montantRecu, montantOff: montantRecu }, updatedAt: new Date() },
-      { upsert: true }
-    );
+    await svc.soldeMouvement(opKey, montantRecu, 'depot valide par SMS');
   }
 
   let depotStatus = 'processing';

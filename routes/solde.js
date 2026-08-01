@@ -112,17 +112,10 @@ router.post('/check-result', apikey, async (req, res) => {
       }
     } catch(eA) { console.error('alerte depot_sans_sms:', eA.message); }
 
-    await Solde.findOneAndUpdate(
-      { operator: opKey },
-      {
-        baseAmount: amount,
-        baseTimestamp,
-        baseRawResponse: ussdResponse,
-        montant: amount, // le solde affiché repart de cette base
-        updatedAt: new Date()
-      },
-      { upsert: true, new: true }
-    );
+    // Constat REEL : passe par le service unique, qui remet les mouvements a
+    // zero. C'est la passerelle qui fait autorite sur le solde.
+    const { soldeVerifie } = require('./soldeService');
+    await soldeVerifie(opKey, amount, 'ussd', ussdResponse);
 
     res.json({ ok: true, operator: opKey, baseAmount: amount, baseTimestamp });
   } catch (e) {
@@ -133,11 +126,26 @@ router.post('/check-result', apikey, async (req, res) => {
 // GET /api/solde — liste des soldes avec infos base (pour badge Vérifié/Estimé)
 router.get('/', auth, async (req, res) => {
   try {
-    const soldes = await Solde.find();
+    // Vue fusionnee : Telma = YAS = MVola, un seul operateur.
+    const { lireSoldes } = require('./soldeService');
+    const vue = await lireSoldes();
+    const soldes = Object.entries(vue).map(([operator, v]) => ({ operator, ...v }));
     res.json(soldes);
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
+});
+
+// POST /api/solde/fusionner — nettoie les documents en double laisses par
+// l'ancien code (qui enregistrait "yas" a cote de "mvola").
+router.post('/fusionner', auth, async (req, res) => {
+  try {
+    if (!req.user || !['admin','superadmin'].includes(req.user.role))
+      return res.status(403).json({ error: 'Acces refuse: admin requis' });
+    const { fusionnerDoublons } = require('./soldeService');
+    const rapport = await fusionnerDoublons();
+    res.json({ ok: true, rapport });
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 module.exports = router;

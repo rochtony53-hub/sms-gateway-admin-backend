@@ -366,13 +366,11 @@ router.patch('/:id/status', auth, async (req, res) => {
     if (status === 'success') {
       const cur = await Retrait.findById(req.params.id);
       if (cur && cur.status !== 'success') {
-        const opKey = (cur.operator||'').toLowerCase();
+        // Cle normalisee obligatoire : l'operateur brut ("yas", "Orange Money")
+        // creait un document Solde parallele, et le total devenait faux.
         const delta = cur.type === 'depot' ? cur.montant : -cur.montant;
-        await Solde.findOneAndUpdate(
-          { operator: opKey },
-          { $inc: { montant: delta, montantOff: delta }, updatedAt: new Date() },
-          { upsert: true }
-        );
+        await require('./soldeService')
+          .soldeMouvement(cur.operator, delta, 'validation manuelle');
       }
     }
     const r = await Retrait.findByIdAndUpdate(
@@ -1076,16 +1074,10 @@ router.post('/:id/ussd-result', apikey, async (req, res) => {
       const soldeReel = lireSoldeDansEchec(texteBrut);
       if (soldeReel != null) {
         try {
-          const opKey = getOpKey(retrait.operator) || retrait.operator;
-          const Solde = require('../models/Solde');
-          const avant = await Solde.findOne({ operator: opKey });
-          await Solde.findOneAndUpdate(
-            { operator: opKey },
-            { $set: { montant: soldeReel, montantOff: soldeReel }, updatedAt: new Date() },
-            { upsert: true }
-          );
-          console.log('solde ' + opKey + ' recale d\'apres le refus operateur : '
-                    + (avant ? avant.montant : '?') + ' -> ' + soldeReel);
+          // L'operateur annonce le solde exact dans son refus : c'est un
+          // constat REEL, pas une estimation.
+          await require('./soldeService')
+            .soldeVerifie(retrait.operator, soldeReel, 'refus operateur', texteBrut);
         } catch (e) { console.error('recalage solde:', e.message); }
       }
 
@@ -1515,13 +1507,9 @@ router.post('/:id/valider', auth, async (req, res) => {
     const cur = await Retrait.findById(req.params.id);
     if (!cur) return res.status(404).json({ error: 'Retrait non trouve' });
     if (cur.status !== 'success') {
-      const opKey = (cur.operator||'').toLowerCase();
       const delta = cur.type === 'depot' ? cur.montant : -cur.montant;
-      await Solde.findOneAndUpdate(
-        { operator: opKey },
-        { $inc: { montant: delta, montantOff: delta }, updatedAt: new Date() },
-        { upsert: true }
-      );
+      await require('./soldeService')
+        .soldeMouvement(cur.operator, delta, 'bouton Valider');
     }
     const r = await Retrait.findByIdAndUpdate(
       req.params.id, { status: 'success', updatedAt: new Date() }, { returnDocument: 'after' }
