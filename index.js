@@ -68,6 +68,7 @@ app.use('/api/deriv',   require('./routes/deriv'));
 app.use('/api/betwinner', require('./routes/betwinner'));
 app.use('/api/alert', require('./routes/alert'));
 app.use('/api/audit', require('./routes/audit'));
+app.use('/api/diag',  require('./routes/diag'));
 
 app.get('/health', (req, res) => res.json({ status: 'ok', version: '1.1.0', time: new Date().toISOString() }));
 
