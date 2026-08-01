@@ -1002,6 +1002,40 @@ router.post('/:id/ussd-result', apikey, async (req, res) => {
     const texteBrut = String(response == null ? '' : response).trim();
 
     if (!success) {
+      // ------------------------------------------------------------------
+      // ISSUE INCONNUE ≠ ECHEC.
+      // ------------------------------------------------------------------
+      // Quand l'API one-shot (MVola) ne rend aucun texte, la passerelle ne
+      // peut pas savoir si l'argent est parti. Or MVola renvoie, APRES un
+      // transfert reussi, un ecran qui redemande une saisie : sur certains
+      // telephones la session remonte en echec alors que le client a ete paye.
+      //
+      // Marquer 'failed' serait definitif : autoValidate (routes/sms.js) ne
+      // rattrape QUE les statuts 'pending' et 'processing'. Le SMS de
+      // confirmation arriverait ensuite et serait ignore — argent parti,
+      // retrait declare perdu, aucune correction possible.
+      //
+      // On laisse donc en 'processing' : le SMS operateur tranchera. S'il
+      // n'arrive pas, expireOldRetraits le basculera en 'failed' au bout
+      // d'une heure. Le doute profite a la tracabilite, jamais au silence.
+      // ------------------------------------------------------------------
+      const issueInconnue = /USSD_ISSUE_INCONNUE/i.test(String(texteBrut))
+                         || /USSD_ISSUE_INCONNUE/i.test(String(motif || ''));
+
+      if (issueInconnue) {
+        const note = 'Issue INCONNUE : aucune reponse lisible de l\'operateur. '
+                   + 'Le transfert a peut-etre abouti. En attente du SMS de '
+                   + 'confirmation — NE PAS relancer sans avoir verifie le solde.';
+        await Retrait.findByIdAndUpdate(retrait._id, {
+          status: 'processing',
+          response: note,
+          lastUssdResponse: texteBrut || 'Aucun texte operateur',
+          updatedAt: new Date()
+        });
+        try { await traceRetrait(retrait._id, note); } catch(_) {}
+        return res.json({ ok: true, status: 'processing', motif: 'inconnu' });
+      }
+
       await Retrait.findByIdAndUpdate(retrait._id, {
         status: 'failed',
         response: (motif && String(motif).trim()) || texteBrut || 'USSD echec',
