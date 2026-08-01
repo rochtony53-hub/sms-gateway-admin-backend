@@ -49,12 +49,20 @@ router.get('/config', auth, role('admin', 'superadmin'), async (req, res) => {
       deriv_app_id:       brut.deriv_app_id || '',
       deriv_cr_agent:     brut.deriv_cr_agent || '',
       deriv_oauth_app_id: brut.deriv_oauth_app_id || '',
-      // Champ laisse VIDE : le laisser tel quel = ne rien changer
-      deriv_token:        '',
-      // Uniquement indicatif, pour l'affichage
+      // Token renvoye en clair : le champ du panel doit rester directement
+      // modifiable, comme avant. Choix assume par l'exploitant.
+      // Contreparties conservees : acces limite a admin/superadmin (jamais
+      // 'viewer'), et chaque lecture est journalisee — si le token fuit un
+      // jour, on saura quel compte et quelle adresse IP y ont accede.
+      deriv_token:        brut.deriv_token || '',
+      // Indicatifs, pour l'affichage
       deriv_token_empreinte: empreinte(brut.deriv_token),
       deriv_token_present:   !!brut.deriv_token
     };
+    if (brut.deriv_token) {
+      audit(req, 'deriv_token_lu', 'lecture de la configuration Deriv', 'alerte')
+        .catch(() => {});
+    }
     res.json(cfg);
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
@@ -65,7 +73,7 @@ router.get('/config', auth, role('admin', 'superadmin'), async (req, res) => {
  * Reserve au superadmin : changer le token Deriv, c'est changer la cle du
  * coffre. Une valeur vide ou masquee laisse le secret INCHANGE.
  * ============================================================ */
-router.post('/config', auth, role('superadmin'), async (req, res) => {
+router.post('/config', auth, role('admin', 'superadmin'), async (req, res) => {
   try {
     const recu = {
       deriv_app_id:       req.body.deriv_app_id,
