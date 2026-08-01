@@ -718,6 +718,43 @@ async function dispatchUssdRetrait(retrait) {
     // PIN separe (Orange) : non concatene au code, saisi a l'invite par le gateway
     const ussdPin = await getSeparatePin(template, opKey);
 
+    // ------------------------------------------------------------------
+    // GARDE-FOU : operateur a PIN separe, mais aucun PIN enregistre.
+    // ------------------------------------------------------------------
+    // Sans ce controle, ussdPin part vide, l'APK bascule en mode one-shot
+    // (TelephonyManager.sendUssdRequest) qui ne sait PAS repondre a l'invite
+    // "Ampidiro ny kaody miafina". L'operateur affiche sa boite, personne n'y
+    // repond, et le retrait reste fige — exactement le bug d'origine, ramene
+    // cette fois par un simple oubli de configuration.
+    // On refuse donc d'envoyer, avec un message qui dit quoi corriger.
+    // ------------------------------------------------------------------
+    if (PIN_DANS_LE_CODE[opKey] === false && !ussdPin) {
+      const motif = 'PIN Mobile Money non enregistre pour ' + opKey.toUpperCase()
+                  + ' — enregistrez-le dans Admin > Codes USSD avant tout retrait.';
+      await traceRetrait(retrait._id, 'BLOQUE: ' + motif);
+      await Retrait.findByIdAndUpdate(retrait._id, {
+        status: 'failed', response: motif, updatedAt: new Date()
+      });
+      return;
+    }
+
+    // Symetrique : operateur a PIN integre, mais aucun PIN enregistre ->
+    // le code partirait tronque (".. *500*#") et l'operateur le rejetterait.
+    // On interroge le PIN directement : chercher un motif dans le code final
+    // est fragile, car le separateur varie selon le modele.
+    const pinIntegre = PIN_DANS_LE_CODE[opKey] === true
+                       ? await getUssdPin(opKey) : null;
+    if (PIN_DANS_LE_CODE[opKey] === true && !pinIntegre) {
+      const motif = 'PIN Mobile Money non enregistre pour ' + opKey.toUpperCase()
+                  + ' — le code USSD serait incomplet. Enregistrez-le dans '
+                  + 'Admin > Codes USSD.';
+      await traceRetrait(retrait._id, 'BLOQUE: ' + motif);
+      await Retrait.findByIdAndUpdate(retrait._id, {
+        status: 'failed', response: motif, updatedAt: new Date()
+      });
+      return;
+    }
+
     // Mitady appareil ONLINE izay manana SIM mifanaraka (sims contient le keyword)
     const Device = require('../models/Device');
     // "online" seul ne suffit pas : rien ne le repasse a false quand le telephone
