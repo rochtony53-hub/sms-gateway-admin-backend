@@ -36,6 +36,11 @@ async function bwFetch(method, path, { sign, body } = {}) {
     const txt = await r.text();
     let json = {};
     try { json = txt ? JSON.parse(txt) : {}; } catch(_) { json = { raw: txt }; }
+    // Trace de diagnostic : sans elle, une reponse inattendue de l'API est
+    // indiscernable d'un joueur inexistant. Aucun secret n'est journalise
+    // (ni hash, ni cashierpass : ils voyagent dans l'en-tete 'sign').
+    console.log('Betwinner ' + method + ' ' + path.split('?')[0]
+              + ' -> HTTP ' + r.status + ' ' + String(txt || '').slice(0, 200));
     if (r.status === 401) { const e = new Error('Signature Betwinner refusée (401)'); e.code='SignInvalid'; e.httpStatus=401; throw e; }
     if (r.status === 403) { const e = new Error('Confirm Betwinner refusé (403)'); e.code='ConfirmInvalid'; e.httpStatus=403; throw e; }
     if (!r.ok) { const e = new Error('Betwinner HTTP ' + r.status + (json.message ? (': ' + json.message) : '')); e.httpStatus=r.status; e.raw=json; throw e; }
@@ -109,8 +114,33 @@ async function betwinnerFindUser(userId) {
   const data = await bwFetch('GET',
     `/Users/${encodeURIComponent(userId)}?confirm=${confirm}&cashdeskid=${encodeURIComponent(cfg.betwinner_cashdeskid)}`,
     { sign });
-  if (!data || data.userId == null) { const e = new Error('Joueur Betwinner introuvable'); e.code='UserNotFound'; e.raw=data; throw e; }
-  return { ok: true, userId: data.userId, name: data.name || '', currencyId: data.currencyId };
+
+  // ------------------------------------------------------------------
+  // L'API Betwinner n'est PAS constante sur la casse des champs : ailleurs
+  // dans ce meme service, betwinnerBalance() lit deja "Balance ?? balance".
+  // Ici on ne testait que "userId" en minuscules : si la reponse contient
+  // "UserId", un joueur parfaitement valide etait declare introuvable.
+  // On accepte donc les deux ecritures.
+  // ------------------------------------------------------------------
+  const id  = data?.UserId ?? data?.userId ?? data?.Id ?? data?.id;
+  const nom = data?.Name   ?? data?.name   ?? '';
+  const dev = data?.CurrencyId ?? data?.currencyId;
+
+  if (!data || id == null) {
+    // Message d'erreur utile : sans le contenu reel de la reponse, on ne
+    // peut pas distinguer "ce joueur n'existe pas" de "l'API a repondu
+    // autre chose que ce qu'on attendait".
+    let detail = '';
+    if (data && typeof data === 'object') {
+      if (data.Message || data.message) detail = String(data.Message || data.message);
+      else detail = JSON.stringify(data).slice(0, 200);
+    }
+    const e = new Error('Joueur Betwinner introuvable'
+      + (detail ? (' — reponse API : ' + detail) : ' (reponse vide)'));
+    e.code = 'UserNotFound'; e.raw = data;
+    throw e;
+  }
+  return { ok: true, userId: id, name: nom, currencyId: dev };
 }
 
 // SOLDE CAISSE — GET Cashdesk/{id}/Balance?confirm=&dt=   (dt = yyyy.MM.dd HH:mm:ss UTC)
