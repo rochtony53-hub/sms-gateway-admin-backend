@@ -60,14 +60,40 @@ function parseMontant(message) {
 // Mitady Retrait pending/processing mifanaraka amin'ny NUMERO hita ao amin'ny SMS.
 // FIX: matching amin'ny numero client (araka ny exemple ao amin'ny template),
 // tsy "pending tranainy indrindra" fotsiny.
-async function findMatchingRetrait(opKey, type, message) {
+/**
+ * @param strict  true = n'accepter QUE une correspondance par numero.
+ *                Utilise pour les SMS qui ne correspondent a aucun template :
+ *                on ne sait pas de quel retrait ils parlent, donc on n'a pas
+ *                le droit de designer une victime au hasard.
+ */
+async function findMatchingRetrait(opKey, type, message, strict) {
   const numero = extractNumeroFromSms(message);
+
+  // En mode strict, sans numero il n'y a AUCUN moyen de savoir de quel retrait
+  // parle ce SMS. Le filtre sans numero renverrait le plus ancien retrait en
+  // cours — un innocent. On prefere ne rien faire.
+  if (strict && !numero) return null;
+
   const filter = { operator: opKey, status: { $in: ['pending','processing'] }, type };
   if (numero) filter.numero = numero;
 
   let candidates = await Retrait.find(filter).sort({ createdAt: 1 });
 
-  if (!candidates.length && numero) {
+  // ------------------------------------------------------------------
+  // REPLI "le plus ancien" — dangereux, donc interdit en mode strict.
+  // ------------------------------------------------------------------
+  // Sans numero exploitable, ce repli renvoie simplement le retrait
+  // pending/processing le plus ancien. Applique a un SMS d'ECHEC, cela
+  // condamne un retrait qui n'a rien a voir : celui-ci passe en 'failed',
+  // et comme autoValidate ne rattrape que 'pending' et 'processing', son
+  // propre SMS de succes sera ensuite ignore. Argent parti, retrait
+  // declare perdu, aucune correction possible.
+  //
+  // Cas reel : "Votre solde MVola est insuffisant. Votre solde est de
+  // 151 Ar. ... Ref:4661996794" — aucun mot-cle de template, aucun numero
+  // au format malgache. Le repli aurait vise un retrait innocent.
+  // ------------------------------------------------------------------
+  if (!candidates.length && numero && !strict) {
     candidates = await Retrait.find({
       operator: opKey, status: { $in: ['pending','processing'] }, type
     }).sort({ createdAt: 1 });
@@ -164,6 +190,31 @@ function lireFrais(message) {
   return null;
 }
 
+/* Formulations annoncant un ECHEC. Servent de condition avant de faire
+ * basculer un retrait en 'failed' sur la foi d'un SMS non reconnu.
+ * Les tournures d'echec contenant un mot positif ("n'a pas reussi") sont
+ * testees en premier, sinon "reussi" les ferait passer pour un succes. */
+const SMS_ECHEC_PATTERNS = [
+  /n'?\s*a\s+pas\s+(r[eé]ussi|about)/i,
+  /pas\s+r[eé]ussi/i,
+  /non\s+r[eé]ussi/i,
+  /solde[^.\n]{0,30}insuffisant/i,
+  /insuffisant/i,
+  /[eé]chou[eé]?/i, /[eé]chec/i,
+  /annul[eé]e?/i,
+  /rejet[eé]e?/i,
+  /impossible/i,
+  /incorrect|invalide/i,
+  /tsy\s*ampy/i, /tsy\s*nahomby/i,
+  /insufficient/i, /failed/i, /declined/i, /cancell?ed/i
+];
+
+/** true si le SMS annonce explicitement un echec. */
+function ressembleAUnEchec(message) {
+  const t = String(message == null ? '' : message);
+  return SMS_ECHEC_PATTERNS.some(re => re.test(t));
+}
+
 async function autoValidate(operator, message, smsId) {
   const opts = settings.getOptions();
   if (!opts.ret_aut) return;
@@ -180,8 +231,34 @@ async function autoValidate(operator, message, smsId) {
   }
 
   if (result === false) {
-    const retrait = await findMatchingRetrait(opKey, 'retrait', message)
-                 || await findMatchingRetrait(opKey, 'depot', message);
+    // ------------------------------------------------------------------
+    // SMS ne correspondant a AUCUN template configure.
+    // ------------------------------------------------------------------
+    // Deux precautions avant de condamner quoi que ce soit :
+    //
+    // 1) MODE STRICT : sans numero identifiable dans le SMS, on ne sait pas
+    //    de quel retrait il parle. Le repli "le plus ancien en cours" ferait
+    //    tomber un innocent. Cas reel : le SMS MVola "Votre solde est
+    //    insuffisant... Ref:4661996794" ne contient aucun numero malgache.
+    //
+    // 2) MOTIF D'ECHEC EXIGE : un SMS non reconnu n'est pas forcement un
+    //    echec. Si l'operateur change une tournure — "transfert de 3000 Ar
+    //    A 0324..." au lieu de "VERS 0324..." — le SMS de SUCCES ne colle
+    //    plus au template, mais il contient bien un numero. Sans ce
+    //    controle, un retrait REUSSI serait marque 'failed', donc plus
+    //    jamais rattrapable : argent parti, retrait declare perdu.
+    //    On n'agit donc que si le texte annonce reellement un echec.
+    // ------------------------------------------------------------------
+    if (!ressembleAUnEchec(message)) {
+      console.warn('SMS ' + opKey + ' non reconnu et sans motif d\'echec : ignore '
+                 + '(verifiez les mots-cles dans Admin > Templates SMS) — "'
+                 + String(message).slice(0, 120) + '"');
+      if (smsId) await Sms.findByIdAndUpdate(smsId, { status: 'matched' });
+      return;
+    }
+
+    const retrait = await findMatchingRetrait(opKey, 'retrait', message, true)
+                 || await findMatchingRetrait(opKey, 'depot', message, true);
     if (retrait) {
       // FIX: receptionStatus = rejete (SMS niditra fa tsy mitovy template)
       await Retrait.findByIdAndUpdate(retrait._id, {
