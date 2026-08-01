@@ -101,7 +101,12 @@ function templateUtilisable(template, type, opKey) {
   const t = String(template == null ? '' : template).trim();
   if (!t) return false;
 
-  if (opKey) {
+  // La regle sur {pin} ne vaut que pour les RETRAITS : c'est la passerelle qui
+  // compose et doit saisir le code secret. Un depot est tape par le CLIENT sur
+  // son propre telephone, avec son propre code : le modele ne contient jamais
+  // {pin}. Appliquer la regle au depot faisait rejeter tous les modeles de
+  // depot MVola, qui retombaient silencieusement sur le Grand Public.
+  if (opKey && type !== 'depot') {
     const souci = verifierModePin(t, opKey);
     if (souci) {
       console.warn('modele USSD ' + type + ' ignore : ' + souci + ' — "' + t
@@ -249,11 +254,21 @@ router.post('/', auth, async (req, res) => {
     const template = await getUssdCode(operator, type);
     // DEPOT: ny code USSD mampiasa ny numéro Gateway (mandray vola), fa tsy ny client.
     let ussdNumero = numero;
+    let numeroGateway = null;
     if (type === 'depot') {
       const cfg = await UssdConfig.findOne({ operator: getOpKey(operator) });
-      if (cfg && cfg.gatewayNumero) ussdNumero = cfg.gatewayNumero;
+      if (cfg && cfg.gatewayNumero) {
+        ussdNumero = cfg.gatewayNumero;
+        numeroGateway = cfg.gatewayNumero;
+      }
     }
-    const ussdCode = await buildUssd(template, ussdNumero, montantFinal, null, getOpKey(operator));
+    // Le numero de la passerelle doit alimenter LES DEUX marqueurs. Avant, seul
+    // {numero} etait renseigne : un modele de depot ecrit avec {numeroGateway}
+    // — pourtant accepte par la validation — produisait un code tronque du type
+    // "#144*1**5000#", que l'operateur rejette. Le depot ne fonctionnait alors
+    // pas du tout, sans message d'erreur.
+    const ussdCode = await buildUssd(template, ussdNumero, montantFinal,
+                                     numeroGateway, getOpKey(operator));
     // PIN separe : le gateway le tape a l'invite operateur (Orange). Vide si {pin}
     // est deja dans le modele (PIN integre au code).
     const ussdPin = await getSeparatePin(template, getOpKey(operator));

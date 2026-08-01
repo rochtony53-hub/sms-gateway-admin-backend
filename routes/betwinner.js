@@ -42,6 +42,45 @@ async function getBetwinnerConfig() {
 // 1) config presente ?  2) solde caisse (valide creds + formule de signature)
 // 3) si userId fourni : essaie plusieurs variantes de signature pour /Users/{id}
 //    et indique laquelle Betwinner accepte (evite de deviner la casse).
+/* Adresse IP par laquelle ce serveur sort vers Internet.
+ * Betwinner filtre l'acces par IP : un 403 identique sur TOUTES les variantes
+ * de signature signifie que la requete est refusee avant tout calcul, donc au
+ * niveau de l'autorisation. Connaitre cette IP permet de la comparer a celle
+ * de la passerelle qui fonctionne, et de la faire declarer chez Betwinner. */
+async function ipSortante() {
+  const sources = ['https://api.ipify.org', 'https://ifconfig.me/ip', 'https://icanhazip.com'];
+  for (const url of sources) {
+    try {
+      const ctrl = new AbortController();
+      const t = setTimeout(() => ctrl.abort(), 5000);
+      const r = await fetch(url, { signal: ctrl.signal });
+      clearTimeout(t);
+      if (r.ok) {
+        const ip = (await r.text()).trim();
+        if (/^[0-9a-fA-F:.]{7,45}$/.test(ip)) return ip;
+      }
+    } catch (_) { /* source suivante */ }
+  }
+  return null;
+}
+
+// GET /api/betwinner/ip — adresse IP sortante du serveur (admin)
+router.get('/ip', auth, async (req, res) => {
+  try {
+    if (!req.user || !['admin','superadmin'].includes(req.user.role))
+      return res.status(403).json({ error: 'Acces refuse: admin requis' });
+    const ip = await ipSortante();
+    res.json({
+      ok: !!ip,
+      ip: ip || null,
+      note: ip
+        ? 'Communiquez cette adresse a Betwinner pour la caisse concernee, '
+        + 'et comparez-la a celle de la passerelle qui fonctionne deja.'
+        : 'Adresse sortante indeterminee (aucun service joignable).'
+    });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 router.get('/diag', auth, async (req, res) => {
   const crypto = require('crypto');
   const sha256 = v => crypto.createHash('sha256').update(String(v)).digest('hex');
@@ -49,6 +88,10 @@ router.get('/diag', auth, async (req, res) => {
   const BASE   = 'https://partners.servcul.com/CashdeskBotAPI';
   const out = { config: {}, balance: null, variants: [], ok: false };
   try {
+    // Adresse IP sortante : element decisif quand toutes les variantes de
+    // signature renvoient le meme code. A comparer avec la passerelle qui
+    // fonctionne deja, et a faire declarer chez Betwinner.
+    out.ipSortante = await ipSortante();
     const cfg = await getBetwinnerConfig();
     const H = cfg.betwinner_hash, P = cfg.betwinner_cashierpass, C = cfg.betwinner_cashdeskid;
     const L = cfg.betwinner_lng || 'fr';
