@@ -796,9 +796,19 @@ async function dispatchUssdRetrait(retrait) {
                + ', dernier contact ' + (min === null ? 'jamais' : ('il y a ' + min + ' min')) + ']';
         }).join(' ; ') || 'aucun appareil enregistre';
       } catch (e5) {}
-      await traceRetrait(retrait._id,
-        'BLOQUE: aucune passerelle ACTIVE avec une SIM "' + keyword + '" pour ' + opKey
-        + '. Ouvrez l\'application sur le telephone gateway et demarrez le service. Appareils: ' + vus);
+      const motif = 'Aucune passerelle ACTIVE avec une SIM "' + keyword + '" pour ' + opKey
+        + '. Ouvrez l\'application sur le telephone gateway et demarrez le service. Appareils: ' + vus;
+      await traceRetrait(retrait._id, 'BLOQUE: ' + motif);
+      // ------------------------------------------------------------------
+      // Le retrait doit passer en 'failed', pas rester en 'processing'.
+      // Sinon il reste indefiniment en attente d'un SMS qui n'arrivera
+      // jamais : aucun code USSD n'a ete compose, aucun argent n'est parti.
+      // Le laisser en 'processing' le rendait invisible — c'est exactement
+      // le symptome d'origine, sous une autre cause.
+      // ------------------------------------------------------------------
+      await Retrait.findByIdAndUpdate(retrait._id, {
+        status: 'failed', response: motif, updatedAt: new Date()
+      });
       return;
     }
 
