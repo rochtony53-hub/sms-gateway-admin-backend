@@ -5,6 +5,7 @@ const Solde   = require('../models/Solde');
 
 function getOpKey(operator) {
   const o = (operator || '').toLowerCase();
+  // Comores AVANT mvola : "mvola_km"/"telma_km"/"comor" contiennent deja mvola.
   if (o.includes('comor') || o.includes('mvola_km') || o.includes('telma_km')) return 'mvola_km';
   if (o.includes('orange')) return 'orange';
   if (o.includes('yas') || o.includes('telma') || o.includes('mvola')) return 'mvola';
@@ -19,7 +20,7 @@ function extractAmount(text) {
   if (!text) return null;
 
   // Cherche le montant avant "Ar" ou "ariary" en priorité
-  const arPattern = /(\d[\d\s.,]*)\s*(?:Ar|ariary|Fc|kmf)/gi;
+  const arPattern = /(\d[\d\s.,]*)\s*(?:Ar|ariary)/gi;
   const arMatches = [...text.matchAll(arPattern)];
   if (arMatches.length > 0) {
     for (const m of arMatches) {
@@ -74,48 +75,17 @@ router.post('/check-result', apikey, async (req, res) => {
 
     const baseTimestamp = timestamp ? new Date(timestamp) : new Date();
 
-    // ===== ALERTE "vola tonga nefa tsy nisy SMS" =====
-    // Raha niakatra ny solde marina (delta > 0) ary misy ordre DEPOT
-    // pending/processing tsy mbola nahazo SMS izay mifanandrify amin'ny
-    // delta (tolerance +10%) -> mamorona alerte admin (Verifier/Valider/Refuser).
-    try {
-      const prev = await Solde.findOne({ operator: opKey }).lean();
-      const soldeAvant = prev ? (Number(prev.montant) || 0) : 0;
-      const delta = amount - soldeAvant;
-      if (delta > 0) {
-        const Retrait = require('../models/Retrait');
-        const Alert = require('../models/Alert');
-        const oneHourAgo = new Date(Date.now() - 60*60*1000);
-        const candidats = await Retrait.find({
-          type: 'depot', operator: opKey,
-          status: { $in: ['pending','processing'] },
-          receptionStatus: { $ne: 'confirme' },
-          createdAt: { $gte: oneHourAgo },
-          $or: [ { lastUssdResponse: { $in: [null, ''] } }, { lastUssdResponse: { $exists: false } } ]
-        }).sort({ createdAt: 1 }).lean();
-        for (const c of candidats) {
-          const mOrd = Math.round(c.montant);
-          if (delta >= mOrd && delta <= Math.round(mOrd * 1.10)) {
-            const deja = await Alert.findOne({ retraitId: c._id, status: 'pending' });
-            if (!deja) {
-              await Alert.create({
-                type: 'depot_sans_sms', retraitId: c._id, operator: opKey,
-                montantAttendu: mOrd, montantRecu: delta,
-                soldeAvant, soldeApres: amount,
-                detail: 'Solde gateway +' + delta + ' (check USSD) nefa tsy nisy SMS ho an\'ity ordre ity'
-              });
-              console.log('[ALERTE] depot sans SMS:', String(c._id), 'delta', delta);
-            }
-            break; // ordre iray ihany isaky ny delta
-          }
-        }
-      }
-    } catch(eA) { console.error('alerte depot_sans_sms:', eA.message); }
-
-    // Constat REEL : passe par le service unique, qui remet les mouvements a
-    // zero. C'est la passerelle qui fait autorite sur le solde.
-    const { soldeVerifie } = require('./soldeService');
-    await soldeVerifie(opKey, amount, 'ussd', ussdResponse);
+    await Solde.findOneAndUpdate(
+      { operator: opKey },
+      {
+        baseAmount: amount,
+        baseTimestamp,
+        baseRawResponse: ussdResponse,
+        montant: amount, // le solde affiché repart de cette base
+        updatedAt: new Date()
+      },
+      { upsert: true, new: true }
+    );
 
     res.json({ ok: true, operator: opKey, baseAmount: amount, baseTimestamp });
   } catch (e) {
@@ -126,26 +96,73 @@ router.post('/check-result', apikey, async (req, res) => {
 // GET /api/solde — liste des soldes avec infos base (pour badge Vérifié/Estimé)
 router.get('/', auth, async (req, res) => {
   try {
-    // Vue fusionnee : Telma = YAS = MVola, un seul operateur.
-    const { lireSoldes } = require('./soldeService');
-    const vue = await lireSoldes();
-    const soldes = Object.entries(vue).map(([operator, v]) => ({ operator, ...v }));
+    const soldes = await Solde.find();
     res.json(soldes);
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
 });
 
-// POST /api/solde/fusionner — nettoie les documents en double laisses par
-// l'ancien code (qui enregistrait "yas" a cote de "mvola").
+// POST /api/solde/fusionner — repare les doublons et supprime le garbage.
+// Appele par le bouton "Reparer les soldes" de l'admin. Cet endpoint avait ete
+// supprime : le bouton renvoyait alors une erreur 404 silencieuse.
+//
+// Ce qu'il fait :
+//   1) Supprime les entrees inexploitables : operateur contenant "debug",
+//      montant negatif (heritage de l'ancien controle "one-shot").
+//   2) Ramene chaque entree a sa cle canonique (orange / mvola / airtel /
+//      mvola_km) et fusionne les doublons ("Orange Money" + "orange" -> un
+//      seul "orange"), en gardant l'entree la plus recente.
 router.post('/fusionner', auth, async (req, res) => {
   try {
-    if (!req.user || !['admin','superadmin'].includes(req.user.role))
-      return res.status(403).json({ error: 'Acces refuse: admin requis' });
-    const { fusionnerDoublons } = require('./soldeService');
-    const rapport = await fusionnerDoublons();
-    res.json({ ok: true, rapport });
-  } catch (e) { res.status(500).json({ error: e.message }); }
+    const VALID = ['orange', 'mvola', 'airtel', 'mvola_km'];
+    const all = await Solde.find();
+
+    const parCanon    = {};   // cle canonique -> document a conserver
+    const aSupprimer  = [];   // _id a supprimer
+    let garbage = 0, fusionnes = 0;
+
+    for (const s of all) {
+      const opRaw = String(s.operator || '');
+      // 1) Garbage explicite : debug_* ou montant negatif.
+      if (opRaw.toLowerCase().includes('debug')
+          || (typeof s.montant === 'number' && s.montant < 0)) {
+        aSupprimer.push(s._id); garbage++; continue;
+      }
+      // 2) Cle canonique.
+      const canon = VALID.includes(opRaw) ? opRaw : getOpKey(opRaw);
+      if (!canon) { aSupprimer.push(s._id); garbage++; continue; }
+
+      const prev = parCanon[canon];
+      if (!prev) { parCanon[canon] = s; continue; }
+      // Doublon : garder le plus recent (baseTimestamp sinon updatedAt).
+      const tNew = new Date(s.baseTimestamp || s.updatedAt || 0).getTime();
+      const tOld = new Date(prev.baseTimestamp || prev.updatedAt || 0).getTime();
+      const keep = tNew >= tOld ? s : prev;
+      const drop = tNew >= tOld ? prev : s;
+      parCanon[canon] = keep;
+      aSupprimer.push(drop._id);
+      fusionnes++;
+    }
+
+    // Supprimer d'ABORD (libere les cles), puis renommer les conserves.
+    if (aSupprimer.length) await Solde.deleteMany({ _id: { $in: aSupprimer } });
+    for (const [canon, doc] of Object.entries(parCanon)) {
+      if (doc.operator !== canon) {
+        await Solde.findByIdAndUpdate(doc._id, { operator: canon, updatedAt: new Date() });
+      }
+    }
+
+    res.json({
+      ok: true,
+      supprimes: aSupprimer.length,
+      garbage,
+      doublonsFusionnes: fusionnes,
+      restants: Object.keys(parCanon).length
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
 });
 
 module.exports = router;
