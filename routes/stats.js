@@ -32,29 +32,18 @@ router.get('/dashboard', auth, async (req, res) => {
     const onlineDevices = devices.filter(d => (Date.now() - new Date(d.lastSeen).getTime()) < 120000);
     const ussdCheckEnabled = onlineDevices.some(d => d.ussdCheckEnabled);
 
-    // Build balances object — mihazo montant (verified) raha ON, montantOff raha OFF.
-    // On CANONICALISE la cle : sans cela, une entree "Orange Money" (au lieu de
-    // "orange") creait une cle distincte -> solde Orange en double dans l'admin.
-    // On ignore aussi les entrees garbage (operateur inconnu, montant negatif).
+    // Build balances object — mihazo montant (verified) raha ON, montantOff raha OFF
+    // Lecture par le service unique : Telma = YAS = MVola, et les eventuels
+    // documents en double sont fusionnes au lieu de s'ecraser l'un l'autre
+    // (l'ancien code faisait "balances[key] = ...", donc le dernier lu gagnait).
+    const vueSolde = await require('./soldeService').lireSoldes();
     const balances = { orange: 0, mvola: 0, airtel: 0, mvola_km: 0 };
     const balancesVerified = { orange: null, mvola: null, airtel: null, mvola_km: null };
-    const canonOp = (op) => {
-      const o = String(op || '').toLowerCase();
-      if (o.includes('comor') || o.includes('mvola_km') || o.includes('telma_km')) return 'mvola_km';
-      if (o.includes('orange')) return 'orange';
-      if (o.includes('yas') || o.includes('telma') || o.includes('mvola')) return 'mvola';
-      if (o.includes('airtel')) return 'airtel';
-      return null;
-    };
-    soldes.forEach(s => {
-      const key = canonOp(s.operator);
-      if (!key) return;                                   // operateur inconnu / debug -> ignore
-      const val = ussdCheckEnabled ? (s.montant || 0) : (s.montantOff || 0);
-      if (typeof val === 'number' && val < 0) return;     // garbage negatif -> ignore
-      balances[key] = val;
-      balancesVerified[key] = ussdCheckEnabled ? (s.baseTimestamp || null) : null;
-    });
-    // Total en Ariary uniquement (mvola_km est en Fc comorien, hors total).
+    for (const [key, v] of Object.entries(vueSolde)) {
+      balances[key] = ussdCheckEnabled ? v.montant : v.montantOff;
+      balancesVerified[key] = ussdCheckEnabled ? (v.baseTimestamp || null) : null;
+    }
+    // Total = Ariary IHANY (mvola_km en Fc tsy tafiditra amin'ny total Ar)
     const total = balances.orange + balances.mvola + balances.airtel;
 
     const devNow = Date.now();
@@ -126,33 +115,14 @@ router.post('/balance', apikey, async (req, res) => {
     const { operator, montant } = req.body;
     if (!operator || montant === undefined)
       return res.status(400).json({ error: 'operator sy montant requis' });
-
-    // ----------------------------------------------------------------
-    // GARDE-FOU ANTI-GARBAGE.
-    // ----------------------------------------------------------------
-    // L'ancien controle de solde "one-shot" cote APK (retire) envoyait ici
-    // des valeurs inexploitables : montant -1 avec un operateur "debug_orange_
-    // UNKNOWN_APPLICATION", qui ecrasaient le vrai solde. Meme si une ancienne
-    // version de l'APK est encore installee quelque part, on refuse desormais :
-    //   - tout operateur contenant "debug"
-    //   - tout montant negatif ou non numerique
-    // La lecture de solde fiable passe par /api/solde/check-result.
-    // ----------------------------------------------------------------
-    const opStr = String(operator).toLowerCase();
-    if (opStr.includes('debug'))
-      return res.status(400).json({ error: 'operator de debug refuse', operator });
-    const montantNum = Number(montant);
-    if (!Number.isFinite(montantNum) || montantNum < 0)
-      return res.status(400).json({ error: 'montant invalide (negatif ou non numerique)', montant });
-
-    const opKey = opStr.includes('orange') ? 'orange'
-                : opStr.includes('mvola') || opStr.includes('yas') || opStr.includes('telma') ? 'mvola'
-                : opStr.includes('airtel') ? 'airtel' : null;
+    const opKey = operator.toLowerCase().includes('orange') ? 'orange'
+                : operator.toLowerCase().includes('mvola') || operator.toLowerCase().includes('yas') || operator.toLowerCase().includes('telma') ? 'mvola'
+                : operator.toLowerCase().includes('airtel') ? 'airtel' : null;
     if (!opKey) return res.status(400).json({ error: 'operator tsy fantatra' });
 
     const s = await Solde.findOneAndUpdate(
       { operator: opKey },
-      { montant: montantNum, updatedAt: new Date() },
+      { montant, updatedAt: new Date() },
       { upsert: true, new: true }
     );
     res.json({ ok: true, operator: opKey, montant: s.montant });
