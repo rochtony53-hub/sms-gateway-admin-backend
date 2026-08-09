@@ -185,4 +185,45 @@ router.delete('/reset', auth, async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
+// ============================================================
+// Orange double portefeuille (tsotra / marchand)
+// GET  /api/ussd/orange-wallet  -> lit la config (pre-remplissage admin)
+// POST /api/ussd/orange-wallet  -> enregistre switch + config marchand
+// Tout est stocke dans Settings (key-value), aucun changement de schema.
+// ============================================================
+router.get('/orange-wallet', auth, async (req, res) => {
+  try {
+    const active     = await getSetting('orange_wallet_active', 'tsotra');
+    const gp_retrait = await getSetting('orange_marchand_gp_retrait', '');
+    const gp_depot   = await getSetting('orange_marchand_gp_depot', '');
+    const gateway    = await getSetting('orange_marchand_gateway', '');
+    const pinDoc     = await Settings.findOne({ key: 'ussd_pin_orange_marchand' });
+    const pin_set    = !!(pinDoc && pinDoc.value && String(pinDoc.value).trim() !== '');
+    res.json({ ok: true, active, gp_retrait, gp_depot, gateway, pin_set });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+router.post('/orange-wallet', auth, async (req, res) => {
+  try {
+    const b = req.body || {};
+    const set = (key, value) =>
+      Settings.findOneAndUpdate({ key }, { value }, { upsert: true });
+
+    if (b.active !== undefined) {
+      const a = String(b.active).toLowerCase() === 'marchand' ? 'marchand' : 'tsotra';
+      await set('orange_wallet_active', a);
+    }
+    if (b.gp_retrait !== undefined) await set('orange_marchand_gp_retrait', String(b.gp_retrait).trim());
+    if (b.gp_depot   !== undefined) await set('orange_marchand_gp_depot',   String(b.gp_depot).trim());
+    if (b.gateway    !== undefined) await set('orange_marchand_gateway',    String(b.gateway).replace(/[\s.\-]/g, ''));
+    if (b.pin !== undefined) {
+      const raw = String(b.pin).trim();
+      if (raw && raw !== '-' && !/^[0-9]{3,8}$/.test(raw))
+        return res.status(400).json({ error: 'PIN marchand invalide (3 a 8 chiffres)' });
+      await set('ussd_pin_orange_marchand', raw === '-' ? '' : raw);
+    }
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 module.exports = router;
