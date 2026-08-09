@@ -148,4 +148,21 @@ router.post('/fusionner', auth, async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// POST /api/solde/orange-wallet — l'APK (master) pilote le portefeuille Orange.
+// Met a jour orange_wallet_active (tsotra|marchand) pour que retrait/depot
+// backend suivent le toggle choisi dans l'APK. Auth par apikey (comme l'APK).
+router.post('/orange-wallet', apikey, async (req, res) => {
+  try {
+    const Settings = require('../models/Settings');
+    const a = String((req.body && req.body.active) || 'tsotra').toLowerCase() === 'marchand'
+      ? 'marchand' : 'tsotra';
+    await Settings.findOneAndUpdate(
+      { key: 'orange_wallet_active' },
+      { value: a },
+      { upsert: true }
+    );
+    res.json({ ok: true, active: a });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 module.exports = router;
