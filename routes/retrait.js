@@ -135,9 +135,27 @@ function genSession(){ return 'S'+Date.now().toString(36).toUpperCase()+Math.flo
 async function getUssdPin(opKey) {
   try {
     const Settings = require('../models/Settings');
+    // Orange double portefeuille : si le portefeuille "marchand" est actif, on
+    // utilise le PIN dedie (ussd_pin_orange_marchand). Fallback sur le PIN
+    // "tsotra" (ussd_pin_orange) si le PIN marchand n'est pas renseigne.
+    if (String(opKey || '').toLowerCase() === 'orange'
+        && String(await getSetting('orange_wallet_active', 'tsotra')).toLowerCase() === 'marchand') {
+      const dm = await Settings.findOne({ key: 'ussd_pin_orange_marchand' });
+      if (dm && dm.value && String(dm.value).trim() !== '') return String(dm.value).trim();
+    }
     const d = await Settings.findOne({ key: 'ussd_pin_' + String(opKey || '').toLowerCase() });
     return (d && d.value) ? String(d.value).trim() : '';
   } catch (e) { return ''; }
+}
+
+/**
+ * Orange double portefeuille : true si le portefeuille "marchand" est actif.
+ * Concerne UNIQUEMENT Orange (les autres operateurs renvoient toujours false).
+ * Piloté par le Setting global "orange_wallet_active" (tsotra | marchand).
+ */
+async function orangeMarchandActif(opKey) {
+  if (String(opKey || '').toLowerCase() !== 'orange') return false;
+  return String(await getSetting('orange_wallet_active', 'tsotra')).toLowerCase() === 'marchand';
 }
 
 // PIN a saisir SEPAREMENT par le gateway.
@@ -714,11 +732,22 @@ async function dispatchUssdRetrait(retrait) {
     const config = await UssdConfig.findOne({ operator: opKey });
     const opts   = require('./settings').getOptions();
     const def    = DEFAULTS[opKey] || {};
+    // Orange double portefeuille : si "marchand" actif, modele + numero gateway
+    // dedies (Settings), avec fallback sur "tsotra". N'affecte QUE Orange.
+    const marchand = await orangeMarchandActif(opKey);
+    let gpRetrait = config?.gp_retrait || def.gp_retrait || '';
+    let gwNumero  = config?.gatewayNumero;
+    if (marchand) {
+      const mTpl = await getSetting('orange_marchand_gp_retrait', '');
+      if (mTpl) gpRetrait = mTpl;
+      const mGw = await getSetting('orange_marchand_gateway', '');
+      if (mGw) gwNumero = mGw;
+    }
     // Meme validation que dans getUssdCode : un modele TPE incomplet ne doit
     // jamais etre compose, surtout ici ou le PIN est arme.
     const template = (opts.tpe_ret && templateUtilisable(config?.tpe_retrait || def.tpe_retrait, 'retrait', opKey))
       ? (config?.tpe_retrait || def.tpe_retrait)
-      : (config?.gp_retrait  || def.gp_retrait || '');
+      : gpRetrait;
     if (!template) {
       await traceRetrait(retrait._id,
         'BLOQUE: aucun code USSD de retrait configure pour ' + opKey + ' (Admin > Codes USSD)');
@@ -727,7 +756,7 @@ async function dispatchUssdRetrait(retrait) {
 
     // numero CLIENT (mahazo vola) -- TSY numeroGateway, satria retrait = vola
     // mankany amin'ny client
-    const ussdCode = await buildUssd(template, retrait.numero, retrait.montant, config?.gatewayNumero, opKey);
+    const ussdCode = await buildUssd(template, retrait.numero, retrait.montant, gwNumero, opKey);
     // PIN separe (Orange) : non concatene au code, saisi a l'invite par le gateway
     const ussdPin = await getSeparatePin(template, opKey);
 

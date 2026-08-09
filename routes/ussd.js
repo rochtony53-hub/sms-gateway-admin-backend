@@ -26,6 +26,22 @@ const DEFAULTS = [
 const Settings = require('../models/Settings');
 const PIN_OPS = ['orange', 'mvola', 'mvola_km', 'airtel'];
 
+// Lecture simple d'un Setting (fallback si absent/vide).
+async function getSetting(cle, defaut) {
+  try {
+    const d = await Settings.findOne({ key: cle });
+    return (d && d.value !== undefined && d.value !== null && String(d.value) !== '')
+      ? String(d.value).trim() : defaut;
+  } catch (e) { return defaut; }
+}
+
+// Orange double portefeuille : true si le portefeuille "marchand" est actif
+// (Setting global "orange_wallet_active"). N'affecte QUE Orange.
+async function orangeMarchandActif(opKey) {
+  if (String(opKey || '').toLowerCase() !== 'orange') return false;
+  return String(await getSetting('orange_wallet_active', 'tsotra')).toLowerCase() === 'marchand';
+}
+
 // GET /api/ussd/pins — PIN mobile money par operateur (admin).
 // Renvoie masque par defaut ; ?reveal=1 pour la valeur reelle (pre-remplissage).
 router.get('/pins', auth, async (req, res) => {
@@ -127,18 +143,26 @@ router.post('/build', apikey, async (req, res) => {
     const config = await UssdConfig.findOne({ operator: opKey });
     const opts   = require('./settings').getOptions();
 
+    // Orange double portefeuille : si "marchand" actif, modele dedie (Settings),
+    // fallback sur "tsotra" (config) si vide. N'affecte QUE Orange.
+    const marchand = await orangeMarchandActif(opKey);
+
     // Choix GP ou TPE selon toggle
     let ussdTemplate = '';
     if (type === 'depot') {
+      let gp = config?.gp_depot || DEFAULTS.find(d=>d.operator===opKey)?.gp_depot || '';
+      if (marchand) { const m = await getSetting('orange_marchand_gp_depot', ''); if (m) gp = m; }
       // tpe_depot toggle ON → TPE, sinon GP
       ussdTemplate = (opts.tpe_depot && config?.tpe_depot)
         ? config.tpe_depot
-        : (config?.gp_depot || DEFAULTS.find(d=>d.operator===opKey)?.gp_depot || '');
+        : gp;
     } else {
+      let gp = config?.gp_retrait || DEFAULTS.find(d=>d.operator===opKey)?.gp_retrait || '';
+      if (marchand) { const m = await getSetting('orange_marchand_gp_retrait', ''); if (m) gp = m; }
       // tpe_ret toggle ON → TPE, sinon GP
       ussdTemplate = (opts.tpe_ret && config?.tpe_retrait)
         ? config.tpe_retrait
-        : (config?.gp_retrait || DEFAULTS.find(d=>d.operator===opKey)?.gp_retrait || '');
+        : gp;
     }
 
     if (!ussdTemplate)
