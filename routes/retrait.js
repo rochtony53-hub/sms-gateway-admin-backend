@@ -225,6 +225,26 @@ async function getMenuReply(opKey) {
   return /^[0-9]{1,3}$/.test(v) ? v : '';
 }
 
+// Multi-etape : un template contenant '|' decrit une SEQUENCE d'ecrans.
+// 1er element = code a composer (dial). Elements suivants = reponses tapees
+// ecran par ecran ('{numero}'/'{montant}' remplis). '{pin}' = PIN, saisi a
+// part a l'invite (arm/PIN) : il est donc EXCLU de menuReply.
+// Renvoie { dial, menuReply, maxSteps } ou null si non multi-etape.
+async function buildMultiStep(template, numero, montant, opKey) {
+  if (!template || template.indexOf('|') < 0) return null;
+  const parts = template.split('|').map(x => (x || '').trim()).filter(x => x !== '');
+  if (parts.length < 2) return null;
+  const fill = (x) => x.split('{numero}').join(numero).split('{montant}').join(montant);
+  const dial = fill(parts[0]);
+  const menuSteps = [];
+  let hasPin = false;
+  for (let i = 1; i < parts.length; i++) {
+    if (parts[i] === '{pin}') { hasPin = true; continue; }
+    menuSteps.push(fill(parts[i]));
+  }
+  return { dial, menuReply: menuSteps.join('|'), maxSteps: menuSteps.length + (hasPin ? 1 : 0) };
+}
+
 async function buildUssd(template, numero, montant, numeroGateway, opKey) {
   if (!template) return null;
   const pin = opKey ? await getUssdPin(opKey) : '';
@@ -756,7 +776,11 @@ async function dispatchUssdRetrait(retrait) {
 
     // numero CLIENT (mahazo vola) -- TSY numeroGateway, satria retrait = vola
     // mankany amin'ny client
-    const ussdCode = await buildUssd(template, retrait.numero, retrait.montant, gwNumero, opKey);
+    // Multi-etape (ex: Airtel *436#|2|1|1|{numero}|{montant}|2|{pin}) : on ne
+    // compose que le 1er code ; la sequence de reponses part via menuReply.
+    const multi = await buildMultiStep(template, retrait.numero, retrait.montant, opKey);
+    const ussdCode = multi ? multi.dial
+      : await buildUssd(template, retrait.numero, retrait.montant, gwNumero, opKey);
     // PIN separe (Orange) : non concatene au code, saisi a l'invite par le gateway
     const ussdPin = await getSeparatePin(template, opKey);
 
@@ -848,8 +872,8 @@ async function dispatchUssdRetrait(retrait) {
     try {
       await Retrait.findByIdAndUpdate(retrait._id, { ussdCode, ussdPin, updatedAt: new Date() });
     } catch (e4) {}
-    const maxSteps  = await getMaxSteps(opKey);
-    const menuReply = await getMenuReply(opKey);
+    const maxSteps  = multi ? multi.maxSteps  : await getMaxSteps(opKey);
+    const menuReply = multi ? multi.menuReply : await getMenuReply(opKey);
     await Device.findByIdAndUpdate(device._id, {
       $push: {
         pendingCmds: {
