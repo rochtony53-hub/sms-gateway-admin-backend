@@ -87,6 +87,10 @@ const PIN_DANS_LE_CODE = { orange: false, mvola: true, mvola_km: true };
  */
 function verifierModePin(template, opKey) {
   if (!template || !(opKey in PIN_DANS_LE_CODE)) return null;
+  // Modele multi-etape : {pin} y designe une ETAPE du menu, pas une
+  // concatenation au code. La regle ci-dessous ne s'y applique pas, sinon un
+  // modele multi-etape parfaitement valable serait rejete.
+  if (String(template).indexOf('|') >= 0) return null;
   const attendu = PIN_DANS_LE_CODE[opKey];
   const present = String(template).includes('{pin}');
   if (attendu && !present)
@@ -158,15 +162,31 @@ async function orangeMarchandActif(opKey) {
   return String(await getSetting('orange_wallet_active', 'tsotra')).toLowerCase() === 'marchand';
 }
 
+/** true si le modele decrit une SEQUENCE d'ecrans (separateur '|'). */
+function estMultiEtape(template) {
+  return !!template && String(template).indexOf('|') >= 0;
+}
+
 // PIN a saisir SEPAREMENT par le gateway.
-// Regle simple et sans reglage supplementaire :
-//   - le modele contient {pin}  -> le PIN est integre au code (ancien mode)
-//   - le modele ne contient PAS {pin} -> le PIN est renvoye a part, le gateway
-//     le tape quand l'operateur affiche "Entrez votre code secret" (cas Orange,
-//     qui refuse un code USSD complet contenant deja le PIN).
+//
+//   MODELE SIMPLE (un seul envoi) :
+//     - contient {pin}      -> PIN concatene dans le code (MVola). Rien a part.
+//     - ne contient pas     -> PIN tape a l'invite (Orange). Envoye a part.
+//
+//   MODELE MULTI-ETAPE ('|') :
+//     buildMultiStep EXCLUT {pin} de menuReply et le compte dans maxSteps :
+//     le PIN n'est donc JAMAIS concatene ici, il est toujours tape a part.
+//     Renvoyer '' dans ce cas (ancien comportement) faisait partir la commande
+//     sans PIN : le gateway remplissait tous les ecrans de menu puis restait
+//     fige sur "Code secret", personne ne repondant. C'est le bug Airtel.
 async function getSeparatePin(template, opKey) {
-  if (!opKey || !template || String(template).includes('{pin}')) return '';
-  return await getUssdPin(opKey);
+  if (!opKey || !template) return '';
+  if (estMultiEtape(template)) {
+    // {pin} present dans la sequence => le PIN part a part. Absent => pas de PIN.
+    return String(template).includes('{pin}') ? await getUssdPin(opKey) : '';
+  }
+  if (String(template).includes('{pin}')) return '';   // concatene au code
+  return await getUssdPin(opKey);                       // tape a l'invite
 }
 
 /* ============================================================
@@ -175,11 +195,20 @@ async function getSeparatePin(template, opKey) {
  *   orange    : PIN tape a l'invite, DEUX ecrans de saisie
  *   mvola     : PIN concatene dans le code USSD ({pin}), un seul envoi
  *   mvola_km  : idem mvola (Comores)
- *   airtel    : AUCUN service de retrait
+ *   airtel    : menu multi-etape ('|'), PIN tape a l'invite
+ * ------------------------------------------------------------
+ * PLUS AUCUN OPERATEUR N'EST INTERDIT EN DUR.
+ * La source de verite est le MODELE configure dans Admin > Codes USSD :
+ *   - modele absent ou inexploitable  -> le retrait est refuse plus bas,
+ *     avec un motif precis ("aucun code USSD de retrait configure") ;
+ *   - modele present                  -> il est suivi tel quel.
+ * Une liste figee ici contredisait l'admin : Airtel y etait interdit alors
+ * qu'un modele de retrait complet y etait configure, et TOUT retrait Airtel
+ * etait rejete avant meme de lire ce modele.
  * ============================================================ */
-const RETRAIT_INTERDIT = ['airtel'];
+const RETRAIT_INTERDIT = [];
 
-/** Nombre d'ecrans de saisie que le gateway doit remplir. */
+/** Nombre d'ecrans de saisie que le gateway doit remplir (modeles NON multi-etape). */
 const ETAPES_DEFAUT = { orange: 2, mvola: 1, mvola_km: 1 };
 
 async function getSetting(cle, defaut) {
@@ -230,11 +259,14 @@ async function getMenuReply(opKey) {
 // ecran par ecran ('{numero}'/'{montant}' remplis). '{pin}' = PIN, saisi a
 // part a l'invite (arm/PIN) : il est donc EXCLU de menuReply.
 // Renvoie { dial, menuReply, maxSteps } ou null si non multi-etape.
-async function buildMultiStep(template, numero, montant, opKey) {
+async function buildMultiStep(template, numero, montant, opKey, numeroGateway) {
   if (!template || template.indexOf('|') < 0) return null;
   const parts = template.split('|').map(x => (x || '').trim()).filter(x => x !== '');
   if (parts.length < 2) return null;
-  const fill = (x) => x.split('{numero}').join(numero).split('{montant}').join(montant);
+  const fill = (x) => x
+    .split('{numeroGateway}').join(numeroGateway || '')
+    .split('{numero}').join(numero)
+    .split('{montant}').join(montant);
   const dial = fill(parts[0]);
   const menuSteps = [];
   let hasPin = false;
@@ -242,7 +274,15 @@ async function buildMultiStep(template, numero, montant, opKey) {
     if (parts[i] === '{pin}') { hasPin = true; continue; }
     menuSteps.push(fill(parts[i]));
   }
-  return { dial, menuReply: menuSteps.join('|'), maxSteps: menuSteps.length + (hasPin ? 1 : 0) };
+  const maxSteps = menuSteps.length + (hasPin ? 1 : 0);
+  // Garde-fou : un modele aberrant (colle par erreur) ne doit pas lancer une
+  // sequence interminable sur le telephone. Le gateway borne son delai a 40 s.
+  if (maxSteps > 12) {
+    console.warn('modele multi-etape ignore : ' + maxSteps
+      + ' etapes, maximum 12 — verifiez Admin > Codes USSD');
+    return null;
+  }
+  return { dial, menuReply: menuSteps.join('|'), maxSteps, hasPin };
 }
 
 async function buildUssd(template, numero, montant, numeroGateway, opKey) {
@@ -778,11 +818,32 @@ async function dispatchUssdRetrait(retrait) {
     // mankany amin'ny client
     // Multi-etape (ex: Airtel *436#|2|1|1|{numero}|{montant}|2|{pin}) : on ne
     // compose que le 1er code ; la sequence de reponses part via menuReply.
-    const multi = await buildMultiStep(template, retrait.numero, retrait.montant, opKey);
+    const multi = await buildMultiStep(template, retrait.numero, retrait.montant, opKey, gwNumero);
     const ussdCode = multi ? multi.dial
       : await buildUssd(template, retrait.numero, retrait.montant, gwNumero, opKey);
-    // PIN separe (Orange) : non concatene au code, saisi a l'invite par le gateway
+    // PIN separe (Orange, et toute sequence multi-etape contenant {pin}) :
+    // non concatene au code, saisi a l'invite par le gateway.
     const ussdPin = await getSeparatePin(template, opKey);
+
+    // ------------------------------------------------------------------
+    // GARDE-FOU multi-etape : la sequence attend un ecran "code secret"
+    // ({pin} present) mais aucun PIN n'est enregistre pour cet operateur.
+    // ------------------------------------------------------------------
+    // Envoyer quand meme ferait remplir tous les ecrans de menu puis figerait
+    // le telephone sur la demande de code secret — le client verrait un retrait
+    // "en cours" qui n'aboutit jamais. Pire, un PIN errone repete peut faire
+    // BLOQUER la carte SIM. On refuse donc avant de composer.
+    // ------------------------------------------------------------------
+    if (multi && multi.hasPin && !ussdPin) {
+      const motif = 'PIN Mobile Money non enregistre pour ' + opKey.toUpperCase()
+                  + ' — le modele multi-etape attend un code secret. '
+                  + 'Enregistrez-le dans Admin > Codes USSD avant tout retrait.';
+      await traceRetrait(retrait._id, 'BLOQUE: ' + motif);
+      await Retrait.findByIdAndUpdate(retrait._id, {
+        status: 'failed', response: motif, updatedAt: new Date()
+      });
+      return;
+    }
 
     // ------------------------------------------------------------------
     // GARDE-FOU : operateur a PIN separe, mais aucun PIN enregistre.
