@@ -75,6 +75,8 @@ function endpoints(env) {
 // marge de securite : le redemander a chaque paiement ajouterait un aller-retour
 // reseau — donc du delai — a chaque ordre client.
 let tokenCache = { valeur: '', expire: 0, empreinte: '' };
+// Forme d'en-tete Authorization qui a fonctionne (voir variantesAuth).
+let varianteOk = '';
 
 /**
  * Construit l'en-tete Authorization de la demande de jeton.
@@ -82,52 +84,100 @@ let tokenCache = { valeur: '', expire: 0, empreinte: '' };
  *   prefixe "Basic " s'il manque, car la console Orange l'affiche parfois sans.
  * - sinon : encodage classique de client_id:client_secret.
  */
-function enteteAuth(cfg) {
+function variantesAuth(cfg) {
   const cle = String(cfg.om_auth_header || '').trim();
-  if (cle) return /^basic\s/i.test(cle) ? cle : ('Basic ' + cle);
-  if (cfg.om_client_id && cfg.om_client_secret) {
-    return 'Basic ' + Buffer.from(cfg.om_client_id + ':' + cfg.om_client_secret).toString('base64');
+  const out = [];
+  if (cle) {
+    // Deja prefixe par un schema : Orange a fourni l'en-tete complet, on n'y
+    // touche pas.
+    if (/^(basic|bearer)\s/i.test(cle)) {
+      out.push({ nom: 'en-tete fourni tel quel', valeur: cle });
+    } else {
+      // Orange communique la cle sous plusieurs formes selon le compte et on ne
+      // peut pas la distinguer a l'oeil : base64 de client_id:client_secret,
+      // en-tete sans prefixe, ou jeton. On essaie donc les formes plausibles
+      // DANS L'ORDRE, une seule fois, uniquement sur la demande de jeton — une
+      // requete sans effet et sans argent. La forme qui marche est memorisee.
+      out.push({ nom: 'Basic <cle>',  valeur: 'Basic ' + cle });
+      out.push({ nom: 'cle brute',    valeur: cle });
+      out.push({ nom: 'Bearer <cle>', valeur: 'Bearer ' + cle });
+    }
   }
-  return '';
+  if (cfg.om_client_id && cfg.om_client_secret) {
+    out.push({
+      nom: 'Basic base64(client_id:client_secret)',
+      valeur: 'Basic ' + Buffer.from(cfg.om_client_id + ':' + cfg.om_client_secret).toString('base64')
+    });
+  }
+  return out;
+}
+
+/** Compatibilite : premiere variante, utilisee pour l'empreinte de cache. */
+function enteteAuth(cfg) {
+  const v = variantesAuth(cfg);
+  return v.length ? v[0].valeur : '';
 }
 
 async function getToken(cfg) {
-  const basic = enteteAuth(cfg);
+  const variantes = variantesAuth(cfg);
   const empreinte = crypto.createHash('sha256')
-    .update(basic + '|' + cfg.om_env)
+    .update((variantes[0] ? variantes[0].valeur : '') + '|' + cfg.om_env)
     .digest('hex').slice(0, 16);
   // Identifiants changes dans l'admin => l'ancien token n'a plus cours.
   if (tokenCache.valeur && tokenCache.expire > Date.now()
       && tokenCache.empreinte === empreinte) {
     return tokenCache.valeur;
   }
-  if (!basic) {
+  if (!variantes.length) {
     throw new Error('Cle API Orange absente : renseignez la cle (en-tete '
       + 'Authorization) OU le couple Client ID / Client Secret '
       + '(Admin > API Orange Money)');
   }
-  const r = await fetchTimeout(endpoints(cfg.om_env).base + '/oauth/v3/token', {
-    method: 'POST',
-    headers: {
-      'Authorization': basic,
-      'Content-Type':  'application/x-www-form-urlencoded',
-      'Accept':        'application/json'
-    },
-    body: 'grant_type=client_credentials'
-  }, 10000);
-  const data = await r.json().catch(() => ({}));
-  if (!r.ok || !data.access_token) {
-    throw new Error('Token Orange refuse (HTTP ' + r.status + ') '
-      + (data.error_description || data.error || '').slice(0, 120));
+
+  const url = endpoints(cfg.om_env).base + '/oauth/v3/token';
+  const echecs = [];
+  // Une variante deja validee est retentee EN PREMIER : en regime normal il n'y
+  // a donc qu'un seul appel.
+  if (varianteOk) {
+    const i = variantes.findIndex(v => v.nom === varianteOk);
+    if (i > 0) variantes.unshift(variantes.splice(i, 1)[0]);
   }
-  const dureeS = Number(data.expires_in || 3600);
-  tokenCache = {
-    valeur: data.access_token,
-    // 5 min de marge : ne jamais presenter un token qui expire en vol.
-    expire: Date.now() + Math.max(60, dureeS - 300) * 1000,
-    empreinte
-  };
-  return tokenCache.valeur;
+
+  for (const v of variantes) {
+    try {
+      const r = await fetchTimeout(url, {
+        method: 'POST',
+        headers: {
+          'Authorization': v.valeur,
+          'Content-Type':  'application/x-www-form-urlencoded',
+          'Accept':        'application/json'
+        },
+        body: 'grant_type=client_credentials'
+      }, 10000);
+      const data = await r.json().catch(() => ({}));
+      if (r.ok && data.access_token) {
+        const dureeS = Number(data.expires_in || 3600);
+        varianteOk = v.nom;
+        tokenCache = {
+          valeur: data.access_token,
+          // 5 min de marge : ne jamais presenter un token qui expire en vol.
+          expire: Date.now() + Math.max(60, dureeS - 300) * 1000,
+          empreinte
+        };
+        console.log('[orange-pay] token obtenu via "' + v.nom + '"');
+        return tokenCache.valeur;
+      }
+      echecs.push(v.nom + ' -> HTTP ' + r.status
+        + (data.error_description ? ' ' + String(data.error_description).slice(0, 80)
+          : (data.error ? ' ' + String(data.error).slice(0, 80) : '')));
+      // 403 = refus reseau (IP non autorisee) : changer de variante n'y fera
+      // rien, on arrete tout de suite.
+      if (r.status === 403) break;
+    } catch (e) {
+      echecs.push(v.nom + ' -> ' + e.message);
+    }
+  }
+  throw new Error('Token Orange refuse. Essais : ' + echecs.join(' | '));
 }
 
 function fetchTimeout(url, options, ms) {
@@ -419,6 +469,7 @@ router.post('/config', auth, async (req, res) => {
     }
     // Identifiants potentiellement changes : le token en cache n'a plus cours.
     tokenCache = { valeur: '', expire: 0, empreinte: '' };
+    varianteOk = '';
     noterSucces();
     res.json({ ok: true });
   } catch (e) { res.status(500).json({ error: e.message }); }
@@ -452,6 +503,7 @@ router.get('/diag', auth, async (req, res) => {
     // une transaction fantome chez Orange.
     const t = await getToken(cfg);
     out.token = t ? 'obtenu (' + t.length + ' caracteres)' : null;
+    out.variante_auth = varianteOk || null;
     out.ok = !!t;
   } catch (e) {
     out.erreur = e.message;
