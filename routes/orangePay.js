@@ -33,8 +33,15 @@ const auth     = require('../middleware/auth');
 const Settings = require('../models/Settings');
 const Retrait  = require('../models/Retrait');
 
+// Orange Developer fournit les identifiants sous DEUX formes selon le compte :
+//   a) une "cle" deja prete = l'en-tete Authorization complet du type
+//      "Basic <base64>"  -> om_auth_header  (cas le plus courant)
+//   b) le couple client_id / client_secret, a encoder soi-meme
+// Les deux sont acceptes. Si la cle est renseignee, elle a la priorite : elle
+// est utilisee telle quelle, sans etre reconstruite — donc sans risque
+// d'erreur d'encodage.
 const KEYS = [
-  'om_client_id', 'om_client_secret', 'om_merchant_key',
+  'om_auth_header', 'om_client_id', 'om_client_secret', 'om_merchant_key',
   'om_env', 'om_return_url', 'om_cancel_url', 'om_notif_url'
 ];
 
@@ -69,23 +76,40 @@ function endpoints(env) {
 // reseau — donc du delai — a chaque ordre client.
 let tokenCache = { valeur: '', expire: 0, empreinte: '' };
 
+/**
+ * Construit l'en-tete Authorization de la demande de jeton.
+ * - cle fournie par Orange : utilisee TELLE QUELLE. On ajoute seulement le
+ *   prefixe "Basic " s'il manque, car la console Orange l'affiche parfois sans.
+ * - sinon : encodage classique de client_id:client_secret.
+ */
+function enteteAuth(cfg) {
+  const cle = String(cfg.om_auth_header || '').trim();
+  if (cle) return /^basic\s/i.test(cle) ? cle : ('Basic ' + cle);
+  if (cfg.om_client_id && cfg.om_client_secret) {
+    return 'Basic ' + Buffer.from(cfg.om_client_id + ':' + cfg.om_client_secret).toString('base64');
+  }
+  return '';
+}
+
 async function getToken(cfg) {
+  const basic = enteteAuth(cfg);
   const empreinte = crypto.createHash('sha256')
-    .update(cfg.om_client_id + '|' + cfg.om_client_secret + '|' + cfg.om_env)
+    .update(basic + '|' + cfg.om_env)
     .digest('hex').slice(0, 16);
   // Identifiants changes dans l'admin => l'ancien token n'a plus cours.
   if (tokenCache.valeur && tokenCache.expire > Date.now()
       && tokenCache.empreinte === empreinte) {
     return tokenCache.valeur;
   }
-  if (!cfg.om_client_id || !cfg.om_client_secret) {
-    throw new Error('Identifiants Orange Money absents (Admin > API Orange Money)');
+  if (!basic) {
+    throw new Error('Cle API Orange absente : renseignez la cle (en-tete '
+      + 'Authorization) OU le couple Client ID / Client Secret '
+      + '(Admin > API Orange Money)');
   }
-  const basic = Buffer.from(cfg.om_client_id + ':' + cfg.om_client_secret).toString('base64');
   const r = await fetchTimeout(endpoints(cfg.om_env).base + '/oauth/v3/token', {
     method: 'POST',
     headers: {
-      'Authorization': 'Basic ' + basic,
+      'Authorization': basic,
       'Content-Type':  'application/x-www-form-urlencoded',
       'Accept':        'application/json'
     },
@@ -375,6 +399,7 @@ router.get('/config', auth, async (req, res) => {
       om_return_url:    cfg.om_return_url || '',
       om_cancel_url:    cfg.om_cancel_url || '',
       om_notif_url:     cfg.om_notif_url || '',
+      om_auth_present:     !!cfg.om_auth_header,
       om_secret_present:   !!cfg.om_client_secret,
       om_merchant_present: !!cfg.om_merchant_key,
       breaker_ouvert:   breakerOuvert()
@@ -406,8 +431,11 @@ router.get('/diag', auth, async (req, res) => {
   try {
     const cfg = await getConfig();
     out.config = {
-      om_client_id:  cfg.om_client_id ? 'OK' : 'MANQUANT',
-      om_client_secret: cfg.om_client_secret ? 'OK' : 'MANQUANT',
+      om_auth_header:   cfg.om_auth_header ? 'OK (cle fournie par Orange)' : 'absente',
+      om_client_id:     cfg.om_client_id ? 'OK' : 'absent',
+      om_client_secret: cfg.om_client_secret ? 'OK' : 'absent',
+      mode_auth: cfg.om_auth_header ? 'cle directe'
+               : ((cfg.om_client_id && cfg.om_client_secret) ? 'client_id/secret' : 'AUCUN'),
       om_merchant_key:  cfg.om_merchant_key ? 'OK' : 'MANQUANT',
       om_env: cfg.om_env,
       devise: endpoints(cfg.om_env).currency,
