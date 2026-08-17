@@ -34,6 +34,29 @@ const retraitSchema = new mongoose.Schema({
   // hikasika ity retrait ity indray mihoatra, ny iray ihany no mahazo manova
   // solde / miantso Deriv. Averina ho false rehefa vita ny dingana.
   locked:     { type: Boolean, default: false },
+  // ==================================================================
+  // ORANGE MONEY WEB PAYMENT (depot via API)
+  // ------------------------------------------------------------------
+  // omOrderId : identifiant transmis a Orange. UNIQUE (index sparse) :
+  //   c'est la cle d'idempotence de la notification. Orange peut rejouer
+  //   le meme notif plusieurs fois ; sans unicite, un depot serait
+  //   credite deux fois.
+  // omNotifToken : jeton rendu par Orange a l'initialisation. La notif
+  //   entrante doit le presenter — c'est l'authentification du webhook,
+  //   qui est public par necessite.
+  // omPayUrl : page de paiement Orange. JAMAIS renvoyee au client tel
+  //   quel ; le client recoit /pay/go/:id qui redirige cote serveur.
+  // ==================================================================
+  // PAS de default:'' — une chaine vide n'est pas null, l'index sparse ne
+  // l'ignorerait donc PAS et le 2e retrait sans paiement Orange serait rejete
+  // pour doublon. Champ absent tant qu'aucun paiement Orange n'est initie.
+  omOrderId:    { type: String },
+  omPayToken:   { type: String, default: '' },
+  omNotifToken: { type: String, default: '' },
+  omPayUrl:     { type: String, default: '' },
+  omStatus:     { type: String, enum: ['', 'init', 'awaiting_payment', 'paid', 'cancelled', 'expired', 'failed'], default: '' },
+  omNotifiedAt: { type: Date },
+  omMontant:    { type: Number, default: 0 },
   response:  { type: String },
   // FIX: heure limite (createdAt + 1h) — raha tafahoatra io ary "processing"
   // mbola, dia automatic "failed". Calculée a la creation.
@@ -59,5 +82,10 @@ const retraitSchema = new mongoose.Schema({
   createdAt: { type: Date, default: Date.now },
   updatedAt: { type: Date, default: Date.now }
 });
+
+// Unicite de omOrderId : garde-fou base de donnees contre le double credit.
+// sparse => les retraits sans paiement Orange (la majorite) ne sont pas
+// concernes par la contrainte.
+retraitSchema.index({ omOrderId: 1 }, { unique: true, sparse: true });
 
 module.exports = mongoose.model('Retrait', retraitSchema);

@@ -66,6 +66,12 @@ app.use('/api/settings', require('./routes/settings'));
 app.use('/api/solde',   require('./routes/solde'));
 app.use('/api/deriv',   require('./routes/deriv'));
 app.use('/api/betwinner', require('./routes/betwinner'));
+// Orange Money Web Payment. /pay/go est monte a la RACINE (pas sous /api) :
+// c'est l'url donnee au client, elle doit rester courte et neutre.
+app.use('/api/orange-pay', require('./routes/orangePay'));
+// Seule la redirection est publique a la racine : url courte donnee au client,
+// sans exposer une seconde fois le webhook ni la configuration.
+app.use('/pay/go',         require('./routes/orangePay').goRouter);
 app.use('/api/alert', require('./routes/alert'));
 app.use('/api/audit', require('./routes/audit'));
 app.use('/api/diag',  require('./routes/diag'));

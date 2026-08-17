@@ -430,6 +430,90 @@ async function autoValidate(operator, message, smsId) {
   if (smsId) await Sms.findByIdAndUpdate(smsId, { status: 'matched', retraitId: claimed._id });
 }
 
+/* ============================================================================
+ * VALIDATION D'UN DEPOT PAYE VIA L'API ORANGE MONEY
+ * ----------------------------------------------------------------------------
+ * Appelee par le webhook Orange (routes/orangePay.js) une fois le paiement
+ * CONFIRME par Orange. Il n'y a pas de SMS ici : la preuve de reception est la
+ * notification Orange, deja authentifiee (notif_token) et deja verifiee sur le
+ * montant par l'appelant.
+ *
+ * On reprend VOLONTAIREMENT la meme mecanique que la validation par SMS :
+ *   - claim atomique (locked) : le webhook peut etre rejoue par Orange, et une
+ *     relance admin peut arriver en meme temps. Un seul passage credite.
+ *   - mouvement de solde par soldeService, comme un depot encaisse.
+ *   - credit du fournisseur (Deriv nickname / Betwinner) avec un request_id
+ *     STABLE derive de l'_id : toute relance reutilise le meme identifiant,
+ *     Deriv deduplique, donc aucun double credit possible.
+ * ==========================================================================*/
+async function validerDepotOrangePay(retraitDoc) {
+  if (!retraitDoc || !retraitDoc._id) return;
+  const opKey = getOpKey(retraitDoc.operator) || 'orange';
+
+  // CLAIM ATOMIQUE — identique au chemin SMS, avec la meme tolerance de
+  // "stale lock" (2 min) au cas ou un crash aurait laisse le verrou pose.
+  const staleLockCutoff = new Date(Date.now() - 2 * 60 * 1000);
+  const claimed = await Retrait.findOneAndUpdate(
+    {
+      _id: retraitDoc._id,
+      type: 'depot',
+      status: { $in: ['pending', 'processing'] },
+      $or: [ { locked: { $ne: true } }, { locked: true, updatedAt: { $lt: staleLockCutoff } } ]
+    },
+    { $set: { locked: true, updatedAt: new Date() } },
+    { new: true }
+  );
+  if (!claimed) {
+    console.warn('[orange-pay] depot', String(retraitDoc._id),
+      'deja en cours de traitement ou deja regle — ignore');
+    return;
+  }
+
+  const montantRecu = Math.round(Number(claimed.omMontant || claimed.montant) || 0);
+  const svc = require('./soldeService');
+  // Pas de solde annonce par Orange : on enregistre le mouvement encaisse.
+  await svc.soldeMouvement(opKey, montantRecu, 'depot paye via API Orange Money');
+
+  let depotStatus = 'processing';
+  let derivErr = '';
+  let derivTxnId = '';
+  const isBetwinnerDepot = /betwinner/i.test(claimed.provider || '');
+  if (claimed.providerId && isBetwinnerDepot) {
+    try {
+      const { betwinnerDeposit } = require('./betwinnerService');
+      const b = await betwinnerDeposit(claimed.providerId, claimed.montant);
+      if (b && b.ok) depotStatus = 'success';
+      else { depotStatus = 'processing'; derivErr = 'Betwinner: reponse non confirmee'; }
+    } catch (e) {
+      console.error('[orange-pay] betwinnerDeposit', String(claimed._id), ':', e.message);
+      depotStatus = 'processing'; derivErr = e.message;
+    }
+  } else if (claimed.providerId) {
+    try {
+      const { restTransferToClient } = require('./derivRest');
+      const reqId = 'dep' + String(claimed._id);   // MEME request_id que le chemin SMS
+      const r = await restTransferToClient(
+        claimed.providerId, claimed.montantUsd || claimed.montant, 'USD', reqId);
+      if (r && r.ok) { depotStatus = 'success'; derivTxnId = r.transaction_id || ''; }
+      else { depotStatus = 'processing'; derivErr = 'Deriv: transfert ' + ((r && r.status) ? r.status : 'non confirme'); }
+    } catch (e) {
+      console.error('[orange-pay] restTransferToClient', String(claimed._id), ':', e.message);
+      depotStatus = 'processing'; derivErr = e.message;
+    }
+  } else {
+    depotStatus = 'processing';
+    derivErr = 'providerId (CR Deriv) manquant';
+  }
+
+  await Retrait.findByIdAndUpdate(claimed._id, {
+    status: depotStatus, receptionStatus: 'confirme',
+    derivTxnId: derivTxnId || claimed.derivTxnId || '', response: derivErr,
+    lastUssdResponse: 'Paiement Orange Money confirme (' + montantRecu + ')',
+    locked: false, updatedAt: new Date()
+  });
+  console.log('[orange-pay] depot', String(claimed._id), '->', depotStatus);
+}
+
 // Recoit SMS depuis APK Android
 router.post('/receive', apikey, async (req, res) => {
   try {
@@ -653,6 +737,7 @@ setInterval(autoRelanceDepotsDeriv, 15 * 60 * 1000);
 module.exports = router;
 // Exports ho an'ny fenetre 1h (ordre aorian'ny vola): retrait.js mampiasa
 module.exports.autoValidate = autoValidate;
+module.exports.validerDepotOrangePay = validerDepotOrangePay;
 module.exports.extractNumeroFromSms = extractNumeroFromSms;
 module.exports.parseMontant = parseMontant;
 module.exports.getOpKeySms = getOpKey;

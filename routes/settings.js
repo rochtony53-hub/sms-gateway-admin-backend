@@ -3,8 +3,12 @@ const auth     = require('../middleware/auth');
 const Settings = require('../models/Settings');
 
 // FIX: tpe_depot sy tpe_ret = false par défaut (Grand Public)
-const DEFAULTS = { tpe_depot: false, tpe_ret: false, cash: false, ret_aut: true, ussd: true };
-const ALLOWED  = ['tpe_depot','tpe_ret','cash','ret_aut','ussd'];
+// depot_api_orange : dep0t Orange via l'API Orange Money Web Payment au lieu
+// du code USSD manuel. false par defaut — on n'active un chemin de paiement
+// qu'explicitement, apres avoir renseigne les identifiants dans l'admin.
+const DEFAULTS = { tpe_depot: false, tpe_ret: false, cash: false, ret_aut: true, ussd: true,
+                   depot_api_orange: false };
+const ALLOWED  = ['tpe_depot','tpe_ret','cash','ret_aut','ussd','depot_api_orange'];
 
 let options = { ...DEFAULTS };
 

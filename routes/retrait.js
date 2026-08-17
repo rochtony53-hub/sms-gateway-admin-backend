@@ -422,7 +422,42 @@ router.post('/', auth, async (req, res) => {
       }
     }
 
-    res.json({ ok: true, ussdCode, channel, id: retrait._id, sessionId });
+    // ====================================================================
+    // DEPOT ORANGE VIA API ORANGE MONEY WEB PAYMENT
+    // --------------------------------------------------------------------
+    // Si le toggle admin est actif, on tente d'ouvrir un paiement Orange.
+    // Le client recevra alors payUrl (notre /pay/go/:id) et sera redirige
+    // vers l'application ou la page Orange : plus de code USSD a composer.
+    //
+    // BASCULE VERS LE TPE : uniquement ICI, AVANT que le client ne soit
+    // envoye chez Orange. Si initPaiement echoue (identifiants, panne,
+    // timeout 8 s, circuit ouvert), on renvoie le code USSD comme avant et
+    // le depot reste possible. Basculer APRES la redirection serait
+    // dangereux : le client pourrait payer chez Orange malgre tout et se
+    // retrouver credite deux fois.
+    // ====================================================================
+    let payUrl = '';
+    if (type === 'depot' && getOpKey(operator) === 'orange' && opts.depot_api_orange) {
+      try {
+        const om = require('./orangePay');
+        const r = await om.initPaiement(retrait, req);   // ne leve jamais
+        if (r && r.payUrl) payUrl = r.payUrl;
+        else console.warn('[depot orange] API indisponible -> repli sur le code USSD (TPE)');
+      } catch (eOm) {
+        console.error('[depot orange] initPaiement:', eOm.message);
+      }
+    }
+
+    res.json({
+      ok: true,
+      // Apres un init Orange reussi, ussdCode a ete vide en base : ne pas le
+      // renvoyer non plus, sinon la vitrine afficherait deux moyens de payer
+      // pour un seul ordre.
+      ussdCode: payUrl ? '' : ussdCode,
+      channel, id: retrait._id, sessionId,
+      payUrl,                       // vide => la vitrine garde le flux TPE
+      payMode: payUrl ? 'orange_api' : 'ussd'
+    });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
