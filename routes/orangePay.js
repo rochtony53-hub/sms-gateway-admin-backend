@@ -41,6 +41,11 @@ const Retrait  = require('../models/Retrait');
 // Les deux sont acceptes. Si la cle est renseignee, elle a la priorite : elle
 // est utilisee telle quelle, sans etre reconstruite — donc sans risque
 // d'erreur d'encodage.
+// Destination par defaut du client apres paiement, si l'admin ne fixe rien.
+// Declaree AVANT toute utilisation : un const n'est pas hoiste, l'utiliser
+// plus haut dans le fichier leverait une ReferenceError a chaque paiement.
+const VITRINE_DEFAUT = 'https://matulmad.com/';
+
 const KEYS = [
   'om_auth_header', 'om_client_id', 'om_client_secret', 'om_merchant_key',
   'om_env', 'om_return_url', 'om_cancel_url', 'om_notif_url'
@@ -247,13 +252,16 @@ async function initPaiement(retrait, req) {
     const omOrderId = 'MM' + String(retrait._id) + '-'
       + crypto.randomBytes(3).toString('hex');
     const racine  = baseUrl(req);
-    // Le client revient TOUJOURS d'abord chez nous : c'est ce passage qui
-    // declenche la verification du paiement aupres d'Orange. On le renvoie
-    // ensuite vers la vitrine. Pointer return_url directement sur la vitrine
-    // ferait perdre ce point de controle — c'est ce qui laissait la commande
-    // en "reception en attente" alors que le client avait paye.
-    const retour  = racine + '/api/orange-pay/retour';
-    const annule  = racine + '/api/orange-pay/annule';
+    // return_url / cancel_url : ADRESSE DE LA VITRINE, configurable.
+    // Orange verifie souvent ces adresses contre le domaine declare dans le
+    // compte marchand : imposer ici une url du backend faisait REJETER la
+    // creation du paiement, et le client restait sur le site sans etre envoye
+    // chez Orange. Le client revient donc directement sur la vitrine.
+    // La verification du paiement ne depend PAS de ce passage : elle est
+    // assuree par la scrutation periodique et par l'appel de verification que
+    // la vitrine declenche en consultant le statut de sa commande.
+    const retour  = cfg.om_return_url || VITRINE_DEFAUT;
+    const annule  = cfg.om_cancel_url || cfg.om_return_url || VITRINE_DEFAUT;
     const notif   = cfg.om_notif_url  || (racine + '/api/orange-pay/notif');
 
     const corps = {
@@ -262,8 +270,12 @@ async function initPaiement(retrait, req) {
       order_id:     omOrderId,
       // Orange attend un entier dans l'unite de la devise.
       amount:       Math.round(Number(retrait.montant) || 0),
-      return_url:   retour + (retour.includes('?') ? '&' : '?') + 'order=' + retrait._id,
-      cancel_url:   annule + (annule.includes('?') ? '&' : '?') + 'order=' + retrait._id,
+      // pay=return / pay=cancel : la vitrine reconnait le retour et lance le
+      // suivi du statut (qui declenche a son tour la verification chez Orange).
+      return_url:   retour + (retour.includes('?') ? '&' : '?')
+                    + 'pay=return&order=' + retrait._id,
+      cancel_url:   annule + (annule.includes('?') ? '&' : '?')
+                    + 'pay=cancel&order=' + retrait._id,
       notif_url:    notif,
       lang:         'fr',
       reference:    'MATULMADA'
@@ -565,7 +577,7 @@ router.get('/retour', async (req, res) => {
   }
   const cfg = await getConfig().catch(() => ({}));
   const vitrine = (cfg.om_return_url || '').startsWith('http')
-    ? cfg.om_return_url : 'https://matulmad.com/';
+    ? cfg.om_return_url : VITRINE_DEFAUT;
   const sep = vitrine.includes('?') ? '&' : '?';
   return res.redirect(302, vitrine + sep + 'pay=return&order=' + encodeURIComponent(id));
 });
@@ -584,7 +596,7 @@ router.get('/annule', async (req, res) => {
   } catch (_) {}
   const cfg = await getConfig().catch(() => ({}));
   const vitrine = (cfg.om_cancel_url || '').startsWith('http')
-    ? cfg.om_cancel_url : 'https://matulmad.com/';
+    ? cfg.om_cancel_url : VITRINE_DEFAUT;
   const sep = vitrine.includes('?') ? '&' : '?';
   return res.redirect(302, vitrine + sep + 'pay=cancel&order='
     + encodeURIComponent(String(req.query.order || '')));
