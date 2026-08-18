@@ -14,6 +14,7 @@ router.get('/dashboard', auth, async (req, res) => {
     const [
       smsTotal, smsToday,
       retraitTotal, retraitSuccess, retraitPending,
+      depotPending, retraitSeulPending,
       devices,
       byOperator,
       soldes
@@ -23,6 +24,11 @@ router.get('/dashboard', auth, async (req, res) => {
       Retrait.countDocuments(),
       Retrait.countDocuments({ status: 'success' }),
       Retrait.countDocuments({ status: 'pending' }),
+      // La collection Retrait porte les DEUX sens (champ type). Un compteur
+      // global "pending" melange donc depots et retraits : le badge lateral
+      // "SMS Retrait" affichait le nombre de DEPOTS en attente. On separe.
+      Retrait.countDocuments({ status: 'pending', type: 'depot' }),
+      Retrait.countDocuments({ status: 'pending', type: { $ne: 'depot' } }),
       Device.find().sort({ lastSeen: -1 }).limit(10),
       Sms.aggregate([{ $group: { _id: '$operator', count: { $sum: 1 } } }]),
       Solde.find()
@@ -49,7 +55,12 @@ router.get('/dashboard', auth, async (req, res) => {
     const devNow = Date.now();
     res.json({
       sms: { total: smsTotal, today: smsToday },
-      retrait: { total: retraitTotal, success: retraitSuccess, pending: retraitPending },
+      // pending reste le total (compatibilite avec l'existant) ; les deux
+      // nouveaux champs permettent d'afficher le bon nombre sur chaque menu.
+      retrait: {
+        total: retraitTotal, success: retraitSuccess, pending: retraitPending,
+        pendingRetrait: retraitSeulPending, pendingDepot: depotPending
+      },
       devices: devices.map(d => ({
         ...d.toObject(),
         online: (devNow - new Date(d.lastSeen).getTime()) < 120000
