@@ -30,6 +30,7 @@
 const router   = require('express').Router();
 const crypto   = require('crypto');
 const auth     = require('../middleware/auth');
+const apikey   = require('../middleware/apikey');
 const Settings = require('../models/Settings');
 const Retrait  = require('../models/Retrait');
 
@@ -246,8 +247,13 @@ async function initPaiement(retrait, req) {
     const omOrderId = 'MM' + String(retrait._id) + '-'
       + crypto.randomBytes(3).toString('hex');
     const racine  = baseUrl(req);
-    const retour  = cfg.om_return_url || (racine + '/api/orange-pay/retour');
-    const annule  = cfg.om_cancel_url || (racine + '/api/orange-pay/annule');
+    // Le client revient TOUJOURS d'abord chez nous : c'est ce passage qui
+    // declenche la verification du paiement aupres d'Orange. On le renvoie
+    // ensuite vers la vitrine. Pointer return_url directement sur la vitrine
+    // ferait perdre ce point de controle — c'est ce qui laissait la commande
+    // en "reception en attente" alors que le client avait paye.
+    const retour  = racine + '/api/orange-pay/retour';
+    const annule  = racine + '/api/orange-pay/annule';
     const notif   = cfg.om_notif_url  || (racine + '/api/orange-pay/notif');
 
     const corps = {
@@ -302,6 +308,169 @@ async function initPaiement(retrait, req) {
   }
 }
 
+
+/* ============================================================================
+ * VERIFICATION ACTIVE DU PAIEMENT (transactionstatus)
+ * ----------------------------------------------------------------------------
+ * La notification d'Orange est un webhook : elle peut ne jamais arriver
+ * (notif_url non declaree chez Orange, instance endormie, reseau). S'appuyer
+ * dessus SEULEMENT laissait la commande en "reception en attente" alors que le
+ * client avait bel et bien paye.
+ *
+ * On demande donc l'etat directement a Orange, qui est la seule source de
+ * verite. Trois declencheurs, tous idempotents :
+ *   - retour du client apres paiement  (immediat)
+ *   - scrutation periodique            (filet, meme si le client ferme tout)
+ *   - notification Orange              (si elle arrive)
+ * Le premier qui obtient SUCCESS credite ; les autres ne font rien.
+ * ==========================================================================*/
+
+const STATUTS_OK     = ['SUCCESS', 'SUCCESSFUL', 'PAID', 'COMPLETED'];
+const STATUTS_ECHEC  = ['FAILED', 'FAILURE', 'CANCELLED', 'CANCELED', 'EXPIRED'];
+
+/** Interroge Orange sur l'etat reel d'une transaction. */
+async function verifierTransaction(retrait) {
+  if (!retrait || !retrait.omOrderId || !retrait.omPayToken) return null;
+  const cfg = await getConfig();
+  const ep  = endpoints(cfg.om_env);
+  const token = await getToken(cfg);
+  const r = await fetchTimeout(ep.base + ep.status, {
+    method: 'POST',
+    headers: {
+      'Authorization': 'Bearer ' + token,
+      'Content-Type':  'application/json',
+      'Accept':        'application/json'
+    },
+    body: JSON.stringify({
+      order_id:  retrait.omOrderId,
+      amount:    Math.round(Number(retrait.omMontant || retrait.montant) || 0),
+      pay_token: retrait.omPayToken
+    })
+  }, 10000);
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) {
+    console.warn('[orange-pay] transactionstatus HTTP ' + r.status + ' '
+      + JSON.stringify(data).slice(0, 160));
+    return null;
+  }
+  return {
+    statut:  String(data.status || data.txnstatus || '').toUpperCase(),
+    montant: Math.round(Number(data.amount != null ? data.amount : 0) || 0),
+    brut:    data
+  };
+}
+
+/**
+ * Marque le paiement comme recu et lance la validation du depot.
+ * IDEMPOTENT PAR LA BASE : la transition awaiting_payment -> paid est faite en
+ * une seule ecriture atomique. Si deux declencheurs arrivent en meme temps
+ * (retour client + scrutation + notification), un seul passe, donc un seul
+ * credit. Verifier puis ecrire en deux temps aurait laisse la place a un
+ * double credit.
+ */
+async function confirmerPaiement(retraitId, montantRecu, source) {
+  const avant = await Retrait.findById(retraitId);
+  if (!avant) return { ok: false, motif: 'ordre introuvable' };
+  if (avant.omStatus === 'paid') return { ok: true, deja: true };
+
+  // Controle du montant AVANT de basculer : un paiement de 100 Ar ne doit
+  // jamais valider une commande de 100 000 Ar.
+  const attendu = Math.round(Number(avant.omMontant || avant.montant) || 0);
+  if (montantRecu && attendu && montantRecu !== attendu) {
+    await Retrait.findByIdAndUpdate(retraitId, {
+      omStatus: 'failed',
+      response: 'Montant Orange different du montant commande ('
+        + montantRecu + ' vs ' + attendu + ')',
+      updatedAt: new Date()
+    });
+    console.error('[orange-pay] MONTANT DIVERGENT ' + avant.omOrderId
+      + ' recu=' + montantRecu + ' attendu=' + attendu);
+    return { ok: false, motif: 'montant divergent' };
+  }
+
+  const claim = await Retrait.findOneAndUpdate(
+    { _id: retraitId, omStatus: 'awaiting_payment' },
+    { $set: { omStatus: 'paid', omNotifiedAt: new Date(), updatedAt: new Date() } },
+    { new: true }
+  );
+  if (!claim) return { ok: true, deja: true };   // un autre declencheur a gagne
+
+  console.log('[orange-pay] PAIEMENT CONFIRME ' + claim.omOrderId
+    + ' montant=' + (montantRecu || attendu) + ' source=' + source);
+
+  try {
+    const smsMod = require('./sms');
+    if (typeof smsMod.validerDepotOrangePay === 'function') {
+      await smsMod.validerDepotOrangePay(claim);
+    } else {
+      console.warn('[orange-pay] validerDepotOrangePay absente — validation admin requise');
+    }
+  } catch (e) {
+    console.error('[orange-pay] validation:', e.message);
+  }
+  return { ok: true };
+}
+
+/** Verifie une commande aupres d'Orange et la fait avancer si besoin. */
+async function verifierEtConclure(retrait, source) {
+  try {
+    const v = await verifierTransaction(retrait);
+    if (!v) return null;
+    if (STATUTS_OK.includes(v.statut)) {
+      await confirmerPaiement(retrait._id, v.montant, source);
+      return 'paid';
+    }
+    if (STATUTS_ECHEC.includes(v.statut)) {
+      await Retrait.findOneAndUpdate(
+        { _id: retrait._id, omStatus: 'awaiting_payment' },
+        { $set: {
+            omStatus: v.statut.startsWith('CANCEL') ? 'cancelled'
+                    : (v.statut === 'EXPIRED' ? 'expired' : 'failed'),
+            updatedAt: new Date()
+        } });
+      return 'ko';
+    }
+    return 'en_cours';                       // INITIATED / PENDING
+  } catch (e) {
+    console.error('[orange-pay] verification (' + source + '):', e.message);
+    return null;
+  }
+}
+
+/* --------------------------------------------------- scrutation periodique */
+// Filet de securite : le client peut fermer son telephone avant de revenir, et
+// la notification peut ne jamais arriver. On repasse sur les paiements encore
+// ouverts, recents uniquement, a un rythme modeste.
+const SCRUT_INTERVAL_MS = 25 * 1000;
+const SCRUT_FENETRE_MS  = 45 * 60 * 1000;   // au-dela, la session Orange est morte
+let scrutationEnCours = false;
+
+async function scruterPaiements() {
+  if (scrutationEnCours) return;             // pas de chevauchement
+  scrutationEnCours = true;
+  try {
+    const depuis = new Date(Date.now() - SCRUT_FENETRE_MS);
+    const ouverts = await Retrait.find({
+      omStatus: 'awaiting_payment',
+      updatedAt: { $gte: depuis }
+    }).limit(20);
+    for (const r of ouverts) {
+      await verifierEtConclure(r, 'scrutation');
+    }
+    // Au-dela de la fenetre : la session de paiement ne peut plus aboutir.
+    // On ferme proprement, sans jamais crediter.
+    await Retrait.updateMany(
+      { omStatus: 'awaiting_payment', updatedAt: { $lt: depuis } },
+      { $set: { omStatus: 'expired', updatedAt: new Date() } }
+    );
+  } catch (e) {
+    console.error('[orange-pay] scrutation:', e.message);
+  } finally {
+    scrutationEnCours = false;
+  }
+}
+setInterval(scruterPaiements, SCRUT_INTERVAL_MS);
+
 /* --------------------------------------------------------- redirection 302 */
 // Le client n'obtient JAMAIS payment_url : il recoit cette url, sur notre
 // domaine. Aucun jeton visible, rien a masquer dans une page intermediaire.
@@ -325,8 +494,6 @@ router.post('/notif', async (req, res) => {
   const statut  = String(b.status || b.txnstatus || '').toUpperCase();
   const montant = Math.round(Number(b.amount != null ? b.amount : b.montant) || 0);
 
-  // Toujours repondre 200 a Orange une fois la notification comprise, sinon il
-  // la rejoue indefiniment. Les refus de securite repondent 4xx.
   try {
     if (!orderId || !token) return res.status(400).json({ error: 'notification incomplete' });
 
@@ -336,67 +503,41 @@ router.post('/notif', async (req, res) => {
       return res.status(404).json({ error: 'ordre inconnu' });
     }
 
-    // 1) AUTHENTIFICATION du webhook
+    // AUTHENTIFICATION du webhook : il est public par necessite.
     if (!r.omNotifToken || token !== r.omNotifToken) {
       console.warn('[orange-pay] notif REFUSEE (jeton invalide) ordre=' + orderId);
       return res.status(403).json({ error: 'jeton invalide' });
     }
 
-    // 2) IDEMPOTENCE : Orange rejoue ses notifications.
-    if (r.omStatus === 'paid') {
-      console.log('[orange-pay] notif deja traitee, ignoree:', orderId);
-      return res.json({ ok: true, deja: true });
-    }
+    if (r.omStatus === 'paid') return res.json({ ok: true, deja: true });
 
-    // 3) Statuts non finaux : on acquitte sans rien crediter.
-    if (statut && !['SUCCESS', 'SUCCESSFUL', 'PAID', 'COMPLETED'].includes(statut)) {
-      if (['FAILED', 'FAILURE', 'CANCELLED', 'CANCELED', 'EXPIRED'].includes(statut)) {
-        r.omStatus = statut.startsWith('CANCEL') ? 'cancelled'
-                   : (statut === 'EXPIRED' ? 'expired' : 'failed');
-        await r.save();
+    if (statut && !STATUTS_OK.includes(statut)) {
+      if (STATUTS_ECHEC.includes(statut)) {
+        await Retrait.findOneAndUpdate(
+          { _id: r._id, omStatus: 'awaiting_payment' },
+          { $set: {
+              omStatus: statut.startsWith('CANCEL') ? 'cancelled'
+                      : (statut === 'EXPIRED' ? 'expired' : 'failed'),
+              updatedAt: new Date()
+          } });
       }
-      console.log('[orange-pay] notif statut=' + statut + ' ordre=' + orderId);
       return res.json({ ok: true, statut });
     }
 
-    // 4) MONTANT : sans ce controle, un paiement de 100 Ar validerait un ordre
-    //    de 100 000 Ar.
-    const attendu = Math.round(Number(r.omMontant || r.montant) || 0);
-    if (montant && attendu && montant !== attendu) {
-      console.error('[orange-pay] MONTANT DIVERGENT ordre=' + orderId
-        + ' recu=' + montant + ' attendu=' + attendu);
-      r.omStatus = 'failed';
-      r.response = 'Montant Orange different du montant commande ('
-        + montant + ' vs ' + attendu + ')';
-      await r.save();
-      return res.status(409).json({ error: 'montant divergent' });
+    // Le webhook annonce un succes : on le RECOUPE avec Orange avant de
+    // crediter. Une notification peut etre rejouee, retardee, ou forgee ;
+    // transactionstatus est la reference. En cas d'indisponibilite, on retombe
+    // sur la notification, deja authentifiee par son jeton.
+    const v = await verifierTransaction(r).catch(() => null);
+    const montantSur = (v && v.montant) ? v.montant : montant;
+    if (v && v.statut && !STATUTS_OK.includes(v.statut)) {
+      console.warn('[orange-pay] notif SUCCESS mais Orange dit "' + v.statut
+        + '" — aucun credit, ordre=' + orderId);
+      return res.json({ ok: true, ignore: true, statutOrange: v.statut });
     }
 
-    // 5) Paiement confirme.
-    r.omStatus     = 'paid';
-    r.omNotifiedAt = new Date();
-    await r.save();
-    console.log('[orange-pay] PAIEMENT CONFIRME ordre=' + orderId + ' montant=' + montant);
-
-    // La suite (reception OK -> credit Deriv -> success) est deleguee a la
-    // chaine existante, pour ne pas dupliquer la logique de validation.
-    try {
-      const smsMod = require('./sms');
-      if (typeof smsMod.validerDepotOrangePay === 'function') {
-        await smsMod.validerDepotOrangePay(r);
-      } else if (typeof smsMod.autoValidateRetrait === 'function') {
-        await smsMod.autoValidateRetrait(r);
-      } else {
-        // Aucun point d'entree disponible : on laisse l'ordre en reception
-        // confirmee, l'admin le voit et peut valider. On ne credite JAMAIS
-        // depuis ici a l'aveugle.
-        console.warn('[orange-pay] aucune fonction de validation trouvee — '
-          + 'ordre marque paid, validation a faire cote admin');
-      }
-    } catch (eV) {
-      console.error('[orange-pay] validation:', eV.message);
-    }
-
+    const out = await confirmerPaiement(r._id, montantSur, 'notification');
+    if (!out.ok) return res.status(409).json({ error: out.motif });
     return res.json({ ok: true });
   } catch (e) {
     console.error('[orange-pay] notif:', e.message);
@@ -408,12 +549,25 @@ router.post('/notif', async (req, res) => {
 // Orange renvoie le client ici. On le repousse vers la vitrine, qui interroge
 // le statut reel : la page de retour n'est JAMAIS une preuve de paiement.
 router.get('/retour', async (req, res) => {
+  const id = String(req.query.order || '');
+  // Le retour du client n'est PAS une preuve de paiement : on demande son etat
+  // reel a Orange ici meme. C'est ce qui permet au serveur de savoir que
+  // l'argent est arrive sans attendre ni SMS ni webhook.
+  try {
+    if (id) {
+      const r = await Retrait.findById(id);
+      if (r && r.omStatus === 'awaiting_payment') {
+        await verifierEtConclure(r, 'retour client');
+      }
+    }
+  } catch (e) {
+    console.error('[orange-pay] retour:', e.message);
+  }
   const cfg = await getConfig().catch(() => ({}));
   const vitrine = (cfg.om_return_url || '').startsWith('http')
     ? cfg.om_return_url : 'https://matulmad.com/';
   const sep = vitrine.includes('?') ? '&' : '?';
-  return res.redirect(302, vitrine + sep + 'pay=return&order='
-    + encodeURIComponent(String(req.query.order || '')));
+  return res.redirect(302, vitrine + sep + 'pay=return&order=' + encodeURIComponent(id));
 });
 
 router.get('/annule', async (req, res) => {
@@ -434,6 +588,29 @@ router.get('/annule', async (req, res) => {
   const sep = vitrine.includes('?') ? '&' : '?';
   return res.redirect(302, vitrine + sep + 'pay=cancel&order='
     + encodeURIComponent(String(req.query.order || '')));
+});
+
+/* ------------------------------------------------- verification a la demande */
+// Appelable par client-api quand la vitrine interroge le statut : le client
+// obtient une reponse a jour sans attendre le prochain passage de scrutation.
+// Protege par la cle de service (apikey), comme les autres appels machine.
+router.post('/verify/:id', apikey, async (req, res) => {
+  try {
+    const r = await Retrait.findById(req.params.id);
+    if (!r) return res.status(404).json({ error: 'ordre introuvable' });
+    if (r.omStatus === 'paid') return res.json({ ok: true, omStatus: 'paid', status: r.status });
+    if (r.omStatus !== 'awaiting_payment') {
+      return res.json({ ok: true, omStatus: r.omStatus, status: r.status });
+    }
+    await verifierEtConclure(r, 'demande vitrine');
+    const maj = await Retrait.findById(req.params.id).select('omStatus status receptionStatus');
+    return res.json({
+      ok: true, omStatus: maj.omStatus, status: maj.status,
+      receptionStatus: maj.receptionStatus
+    });
+  } catch (e) {
+    return res.status(500).json({ error: e.message });
+  }
 });
 
 /* ------------------------------------------------------------- config API */
