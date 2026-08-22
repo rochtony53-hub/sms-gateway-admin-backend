@@ -220,10 +220,28 @@ function noterSucces() { BREAKER.echecs = []; BREAKER.ouvertJusqua = 0; }
 
 /* ------------------------------------------------------------ init paiement */
 
+/**
+ * Adresse PUBLIQUE du backend, telle qu'un client ou Orange doit la voir.
+ *
+ * Elle ne peut PAS etre deduite de la requete : le client-api appelle le
+ * backend en local (http://127.0.0.1:3000), et l'adresse ainsi obtenue partait
+ * telle quelle dans payUrl — le telephone du client recevait alors
+ * "127.0.0.1", c'est-a-dire lui-meme, et affichait "site inaccessible".
+ * Le webhook envoye a Orange aurait souffert du meme defaut.
+ *
+ * PUBLIC_BASE_URL fait donc foi ; la deduction ne sert que de repli quand la
+ * variable n'est pas renseignee.
+ */
 function baseUrl(req) {
-  // Utilisee pour /pay/go et le webhook quand l'admin ne les a pas fixes.
+  const fixe = String(process.env.PUBLIC_BASE_URL || '').trim().replace(/\/$/, '');
+  if (fixe) return fixe;
   const proto = (req.headers['x-forwarded-proto'] || req.protocol || 'https').split(',')[0];
-  return proto + '://' + req.get('host');
+  const host  = req.get('host') || '';
+  if (/^(127\.0\.0\.1|localhost)/i.test(host)) {
+    console.error('[orange-pay] PUBLIC_BASE_URL absente et requete locale : '
+      + 'l\'adresse envoyee au client serait inutilisable. Definissez PUBLIC_BASE_URL.');
+  }
+  return proto + '://' + host;
 }
 
 /**
