@@ -1426,6 +1426,96 @@ async function autoPollDerivWithdrawRest() {
 }
 setInterval(autoPollDerivWithdrawRest, 30 * 1000);
 
+/* ============================================================================
+ * RETRAITS RESTES SANS VERDICT
+ * ----------------------------------------------------------------------------
+ * Un retrait passe en "processing" quand le fournisseur a debite le client et
+ * que le code USSD part vers la passerelle. C'est ensuite la passerelle qui
+ * tranche : reussi ou echoue.
+ *
+ * Si elle ne repond jamais — telephone eteint, sans reseau, application fermee
+ * — l'ordre restait en "processing" INDEFINIMENT. Deux consequences, toutes
+ * deux mauvaises :
+ *   - le client voit "Envoi en cours..." sans fin, sans jamais savoir ;
+ *   - l'argent est deja parti de son compte fournisseur et PERSONNE n'est
+ *     prevenu qu'il faut le lui rendre ou refaire l'envoi.
+ *
+ * On tranche donc a la place de la passerelle passe un delai franc, et on ouvre
+ * une alerte quand un debit fournisseur a eu lieu. Le montant n'est jamais
+ * rendu automatiquement : rien ne prouve ici que l'envoi mobile money n'est pas
+ * parti malgre tout, et rembourser un envoi effectivement realise reviendrait a
+ * payer deux fois. La decision reste humaine, mais elle est desormais PROVOQUEE
+ * au lieu d'etre attendue.
+ * ==========================================================================*/
+
+// Delai au-dela duquel une passerelle muette est consideree comme perdue.
+// Large : la file USSD peut retenir un ordre plusieurs minutes (surveillance
+// interne de la passerelle ~5 min), et conclure trop tot afficherait un echec
+// a un client dont l'argent est en route.
+const SANS_REPONSE_MS = 15 * 60 * 1000;
+
+async function surveillerRetraitsSansReponse() {
+  try {
+    const limite = new Date(Date.now() - SANS_REPONSE_MS);
+    const bloques = await Retrait.find({
+      type: 'retrait',
+      status: 'processing',
+      updatedAt: { $lt: limite }
+    }).limit(50);
+
+    for (const r of bloques) {
+      // Transition atomique : si un verdict de la passerelle arrive pendant ce
+      // traitement, c'est LUI qui doit gagner, pas notre conclusion par defaut.
+      const pris = await Retrait.findOneAndUpdate(
+        { _id: r._id, status: 'processing' },
+        { $set: {
+            status: 'failed',
+            response: "Passerelle sans reponse au-dela de "
+              + Math.round(SANS_REPONSE_MS / 60000) + " min. "
+              + "Envoi mobile money NON confirme — verifier le solde de la SIM "
+              + "et le SMS operateur avant toute relance.",
+            updatedAt: new Date()
+        } },
+        { new: true }
+      );
+      if (!pris) continue;
+
+      console.warn('[retrait] sans reponse -> echec ' + pris._id
+        + ' ' + pris.operator + ' ' + pris.montant);
+
+      // Le client a-t-il deja ete debite ? Si oui, quelqu'un doit agir.
+      const ref = String(pris.derivTxnId || pris.derivRequestId || '');
+      if (ref) {
+        try {
+          const Alert = require('../models/Alert');
+          const dejaOuverte = await Alert.findOne({
+            retraitId: pris._id, type: 'retrait_sans_reponse'
+          });
+          if (!dejaOuverte) {
+            await Alert.create({
+              type: 'retrait_sans_reponse',
+              retraitId: pris._id,
+              operator: pris.operator,
+              montantAttendu: pris.montant,
+              refFournisseur: ref,
+              detail: 'Client debite chez ' + (pris.provider || 'le fournisseur')
+                + ' (ref ' + ref + ') mais l\'envoi mobile money n\'a jamais ete '
+                + 'confirme. Verifier le solde de la SIM et le SMS operateur : '
+                + 'soit refaire l\'envoi, soit rembourser le client.'
+            });
+            console.warn('[retrait] ALERTE ouverte — client debite, envoi non confirme: ' + pris._id);
+          }
+        } catch (e) {
+          console.error('[retrait] ouverture alerte:', e.message);
+        }
+      }
+    }
+  } catch (e) {
+    console.error('surveillerRetraitsSansReponse:', e.message);
+  }
+}
+setInterval(surveillerRetraitsSansReponse, 60 * 1000);
+
 // RETRAIT OAuth Deriv
 /* ============================================================
  * FLUX BETWINNER (Cashdesk API) — tsotra: tsy misy OAuth/OTP email
