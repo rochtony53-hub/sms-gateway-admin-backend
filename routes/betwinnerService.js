@@ -6,7 +6,7 @@
 // confirm = MD5("{userId}:{hash}")
 // Vecteurs du doc validés: step1 ✅ (userid minuscule), confirm ✅, formule finale ✅.
 const crypto = require('crypto');
-const { getBetwinnerConfig } = require('./betwinner');
+const { getBetwinnerConfig, getCashdeskConfig } = require('./betwinner');
 
 const BW_BASE = 'https://partners.servcul.com/CashdeskBotAPI';
 const BW_TIMEOUT_MS = 25000;
@@ -16,10 +16,25 @@ const md5    = s => crypto.createHash('md5').update(String(s)).digest('hex');
 
 function requireCfg(cfg) {
   if (!cfg.betwinner_hash || !cfg.betwinner_cashierpass || !cfg.betwinner_cashdeskid) {
-    const e = new Error('Betwinner non configuré (hash / cashierpass / cashdeskid)');
+    const nom = (cfg && cfg._marque) || 'Betwinner';
+    const e = new Error(nom + ' non configuré (hash / cashierpass / cashdeskid)');
     e.code = 'BetwinnerNotConfigured';
     throw e;
   }
+}
+
+/**
+ * Betwinner et 1xBet sont deux marques du MEME reseau Cashdesk : meme URL, memes
+ * formules de signature, seuls les identifiants changent. Les fonctions ci-dessous
+ * prennent donc une marque en premier argument, et getCashdeskConfig renvoie la
+ * config de cette marque sous des cles identiques -- le reste du code n'a pas a
+ * savoir laquelle il manipule.
+ *
+ * Les anciens noms (betwinnerDeposit, ...) restent disponibles en fin de fichier
+ * et pointent sur la marque 'betwinner' : AUCUN appelant existant n'est modifie.
+ */
+async function cfgDe(marque) {
+  return marque ? await getCashdeskConfig(marque) : await getBetwinnerConfig();
 }
 
 async function bwFetch(method, path, { sign, body } = {}) {
@@ -52,8 +67,8 @@ async function bwFetch(method, path, { sign, body } = {}) {
 }
 
 // DÉPÔT — POST Deposit/{userId}/Add  (summa = Ariary, entier)
-async function betwinnerDeposit(userId, summaAr) {
-  const cfg = await getBetwinnerConfig();
+async function cashdeskDeposit(marque, userId, summaAr) {
+  const cfg = await cfgDe(marque);
   requireCfg(cfg);
   const lng = cfg.betwinner_lng || 'fr';
   const summa = Math.round(Number(summaAr)); // Ariary direct, entier
@@ -76,8 +91,8 @@ async function betwinnerDeposit(userId, summaAr) {
 
 // RETRAIT (payout) — POST Deposit/{userId}/Payout  (code = code client Betwinner)
 // Ny montant dia FANTATRA amin'ny réponse (summa) rehefa mahomby.
-async function betwinnerPayout(userId, code) {
-  const cfg = await getBetwinnerConfig();
+async function cashdeskPayout(marque, userId, code) {
+  const cfg = await cfgDe(marque);
   requireCfg(cfg);
   const lng = cfg.betwinner_lng || 'fr';
   const s1 = sha256(`hash=${cfg.betwinner_hash}&lng=${lng}&userid=${userId}`);
@@ -104,8 +119,8 @@ async function betwinnerPayout(userId, code) {
 // C'est coherent avec la signature generale du doc, dont le vecteur officiel
 // n'est reproductible qu'avec "userid" minuscule.
 // step1: "hash={h}&userid={u}&cashdeskid={c}"   step2: "userid={u}&cashierpass={p}&hash={h}"
-async function betwinnerFindUser(userId) {
-  const cfg = await getBetwinnerConfig();
+async function cashdeskFindUser(marque, userId) {
+  const cfg = await cfgDe(marque);
   requireCfg(cfg);
   const s1 = sha256(`hash=${cfg.betwinner_hash}&userid=${userId}&cashdeskid=${cfg.betwinner_cashdeskid}`);
   const s2 = md5(`userid=${userId}&cashierpass=${cfg.betwinner_cashierpass}&hash=${cfg.betwinner_hash}`);
@@ -144,8 +159,8 @@ async function betwinnerFindUser(userId) {
 }
 
 // SOLDE CAISSE — GET Cashdesk/{id}/Balance?confirm=&dt=   (dt = yyyy.MM.dd HH:mm:ss UTC)
-async function betwinnerBalance() {
-  const cfg = await getBetwinnerConfig();
+async function cashdeskBalance(marque) {
+  const cfg = await cfgDe(marque);
   requireCfg(cfg);
   const d = new Date();
   const p = n => String(n).padStart(2, '0');
@@ -160,4 +175,15 @@ async function betwinnerBalance() {
   return { ok: true, balance: data?.Balance ?? data?.balance ?? null, limit: data?.Limit ?? data?.limit ?? null };
 }
 
-module.exports = { betwinnerDeposit, betwinnerPayout, betwinnerFindUser, betwinnerBalance };
+// --- Anciens noms : marque 'betwinner' implicite ---------------------------
+// Conserves a l'identique pour que les 7 fichiers qui les appellent restent
+// inchanges. Toute evolution passe desormais par les fonctions cashdesk*.
+const betwinnerDeposit  = (userId, summaAr) => cashdeskDeposit('betwinner', userId, summaAr);
+const betwinnerPayout   = (userId, code)    => cashdeskPayout('betwinner', userId, code);
+const betwinnerFindUser = (userId)          => cashdeskFindUser('betwinner', userId);
+const betwinnerBalance  = ()                => cashdeskBalance('betwinner');
+
+module.exports = {
+  betwinnerDeposit, betwinnerPayout, betwinnerFindUser, betwinnerBalance,
+  cashdeskDeposit,  cashdeskPayout,  cashdeskFindUser,  cashdeskBalance
+};

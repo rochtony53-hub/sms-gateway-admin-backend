@@ -38,6 +38,39 @@ async function getBetwinnerConfig() {
   return cfg;
 }
 
+/**
+ * Config d'une marque du reseau Cashdesk (Betwinner, 1xBet...).
+ *
+ * Betwinner et 1xBet partagent LA MEME API (partners.servcul.com) et les memes
+ * formules de signature : seuls les identifiants different. On lit donc la
+ * meme structure de reglages sous un prefixe different, et on la renvoie
+ * TOUJOURS avec les cles "betwinner_*" pour que le service, lui, n'ait pas a
+ * savoir de quelle marque il s'agit.
+ *
+ * @param marque 'betwinner' (defaut) ou 'onexbet'
+ */
+const MARQUES = {
+  betwinner: { prefixe: 'betwinner', nom: 'Betwinner' },
+  onexbet:   { prefixe: 'onexbet',   nom: '1xBet' }
+};
+
+async function getCashdeskConfig(marque) {
+  const m = MARQUES[String(marque || 'betwinner').toLowerCase()] || MARQUES.betwinner;
+  if (m.prefixe === 'betwinner') return { ...(await getBetwinnerConfig()), _marque: m.nom };
+  const cles = [m.prefixe + '_hash', m.prefixe + '_cashierpass',
+                m.prefixe + '_cashdeskid', m.prefixe + '_lng'];
+  const docs = await Settings.find({ key: { $in: cles } });
+  const brut = {};
+  docs.forEach(d => { brut[d.key] = String(d.value || '').trim(); });
+  return {
+    betwinner_hash:        brut[m.prefixe + '_hash']        || '',
+    betwinner_cashierpass: brut[m.prefixe + '_cashierpass'] || '',
+    betwinner_cashdeskid:  brut[m.prefixe + '_cashdeskid']  || '',
+    betwinner_lng:         brut[m.prefixe + '_lng']         || 'fr',
+    _marque: m.nom
+  };
+}
+
 // GET /api/betwinner/diag[?userId=123] — DIAGNOSTIC (admin).
 // 1) config presente ?  2) solde caisse (valide creds + formule de signature)
 // 3) si userId fourni : essaie plusieurs variantes de signature pour /Users/{id}
@@ -225,3 +258,5 @@ router.get('/diag', auth, async (req, res) => {
 
 module.exports = router;
 module.exports.getBetwinnerConfig = getBetwinnerConfig;
+module.exports.getCashdeskConfig  = getCashdeskConfig;
+module.exports.MARQUES            = MARQUES;
