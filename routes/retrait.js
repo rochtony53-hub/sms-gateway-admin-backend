@@ -1527,9 +1527,13 @@ router.post('/betwinner-user', async (req, res) => {
   try {
     // marque : 'betwinner' (defaut, comportement inchange) ou 'onexbet'.
     // Betwinner et 1XBET partagent l'API mais PAS la caisse.
-    const { userId, marque } = req.body;
-    const mq = /1xbet|onexbet/i.test(String(marque || '')) ? 'onexbet' : 'betwinner';
-    const nomMarque = mq === 'onexbet' ? '1XBET' : 'Betwinner';
+    // La recherche de joueur interroge la caisse : aux Comores c'est une caisse
+    // 1XBET distincte, d'ou l'operateur en plus de la marque.
+    const { userId, marque, operator } = req.body;
+    const est1x = /1xbet|onexbet/i.test(String(marque || ''));
+    const estKm = /mvola_km|comor/i.test(String(operator || ''));
+    const mq = est1x ? (estKm ? 'onexbet_km' : 'onexbet') : 'betwinner';
+    const nomMarque = est1x ? '1XBET' : 'Betwinner';
     if (!userId || !/^[0-9]+$/.test(String(userId).trim()))
       return res.status(400).json({ error: 'ID ' + nomMarque + ' invalide (chiffres uniquement)' });
     const { cashdeskFindUser } = require('./betwinnerService');
@@ -1546,8 +1550,11 @@ router.post('/betwinner-user', async (req, res) => {
 router.post('/betwinner-withdraw', async (req, res) => {
   try {
     const { userId, code, numero, operator, marque } = req.body;
-    const mq = /1xbet|onexbet/i.test(String(marque || '')) ? 'onexbet' : 'betwinner';
-    const nomMarque = mq === 'onexbet' ? '1XBET' : 'Betwinner';
+    const est1x = /1xbet|onexbet/i.test(String(marque || ''));
+    const estKm = /mvola_km|comor/i.test(String(operator || ''));
+    // Trois caisses : Betwinner (MG), 1XBET (MG), 1XBET KM (Comores, en Fc).
+    const mq = est1x ? (estKm ? 'onexbet_km' : 'onexbet') : 'betwinner';
+    const nomMarque = est1x ? '1XBET' : 'Betwinner';
     if (!userId || !code || !numero || !operator)
       return res.status(400).json({ error: 'champs requis: userId, code, numero, operator' });
     if (!/^[0-9]+$/.test(String(userId).trim()))

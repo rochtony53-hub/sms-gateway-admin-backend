@@ -47,15 +47,24 @@ function estCashdesk(provider) {
 }
 
 /**
- * Marque a utiliser pour ce fournisseur.
+ * Marque a utiliser, donc CAISSE a debiter ou crediter.
  *
- * INDISPENSABLE : Betwinner et 1XBET ont des identifiants DIFFERENTS et donc
- * des caisses differentes. Se contenter d'elargir le test a "1xbet" sans
- * choisir la marque enverrait l'argent d'un depot 1XBET sur la caisse
- * Betwinner. Cette fonction est ce qui empeche cette erreur.
+ * Trois caisses distinctes, avec des identifiants entierement separes :
+ *   Betwinner   -> operateurs de Madagascar
+ *   1XBET       -> operateurs de Madagascar
+ *   1XBET KM    -> Comores (mvola_km), en franc comorien
+ *
+ * C'est l'OPERATEUR qui separe les deux caisses 1XBET : le fournisseur
+ * enregistre vaut "1XBET" des deux cotes. Omettre l'operateur ferait donc
+ * partir un mouvement comorien sur la caisse malgache.
+ *
+ * En l'absence d'operateur on retombe sur la caisse malgache : c'est le
+ * comportement d'avant les Comores, et il ne peut pas creer de melange
+ * puisqu'un ordre comorien porte toujours son operateur mvola_km.
  */
-function marqueDe(provider) {
-  return /1xbet/i.test(String(provider || '')) ? 'onexbet' : 'betwinner';
+function marqueDe(provider, operator) {
+  if (!/1xbet/i.test(String(provider || ''))) return 'betwinner';
+  return /mvola_km|comor/i.test(String(operator || '')) ? 'onexbet_km' : 'onexbet';
 }
 
 async function bwFetch(method, path, { sign, body } = {}) {

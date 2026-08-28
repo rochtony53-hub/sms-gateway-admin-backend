@@ -6,13 +6,15 @@ const Settings = require('../models/Settings');
 const KEYS = ['betwinner_hash', 'betwinner_cashierpass', 'betwinner_cashdeskid', 'betwinner_login', 'betwinner_lng'];
 // 1xBet : meme reseau Cashdesk, identifiants distincts.
 const KEYS_1XBET = ['onexbet_hash', 'onexbet_cashierpass', 'onexbet_cashdeskid', 'onexbet_login', 'onexbet_lng'];
+// 1XBET Comores : troisieme caisse, en Fc.
+const KEYS_1XBET_KM = ['onexbet_km_hash', 'onexbet_km_cashierpass', 'onexbet_km_cashdeskid', 'onexbet_km_login', 'onexbet_km_lng'];
 
 // GET /api/betwinner/config — admin maka ny config
 router.get('/config', auth, async (req, res) => {
   try {
     // Les deux marques sont renvoyees ensemble : l'admin affiche un panneau
     // Betwinner et un panneau 1xBet, alimentes par le meme appel.
-    const toutes = KEYS.concat(KEYS_1XBET);
+    const toutes = KEYS.concat(KEYS_1XBET).concat(KEYS_1XBET_KM);
     const docs = await Settings.find({ key: { $in: toutes } });
     const cfg = {};
     toutes.forEach(k => cfg[k] = '');
@@ -24,7 +26,7 @@ router.get('/config', auth, async (req, res) => {
 // POST /api/betwinner/config — admin manova ny config
 router.post('/config', auth, async (req, res) => {
   try {
-    for (const key of KEYS.concat(KEYS_1XBET)) {
+    for (const key of KEYS.concat(KEYS_1XBET).concat(KEYS_1XBET_KM)) {
       if (req.body[key] !== undefined) {
         await Settings.findOneAndUpdate({ key }, { value: req.body[key] }, { upsert: true });
       }
@@ -55,8 +57,12 @@ async function getBetwinnerConfig() {
  * @param marque 'betwinner' (defaut) ou 'onexbet'
  */
 const MARQUES = {
-  betwinner: { prefixe: 'betwinner', nom: 'Betwinner' },
-  onexbet:   { prefixe: 'onexbet',   nom: '1xBet' }
+  betwinner:  { prefixe: 'betwinner',  nom: 'Betwinner' },
+  onexbet:    { prefixe: 'onexbet',    nom: '1XBET' },
+  // Caisse 1XBET des Comores : compte SEPARE, en franc comorien. Identifiants
+  // entierement distincts de la caisse malgache -- s'y tromper enverrait
+  // l'argent sur la mauvaise caisse.
+  onexbet_km: { prefixe: 'onexbet_km', nom: '1XBET KM' }
 };
 
 async function getCashdeskConfig(marque) {

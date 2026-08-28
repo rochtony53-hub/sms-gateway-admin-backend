@@ -387,7 +387,7 @@ async function autoValidate(operator, message, smsId) {
     // CASHDESK: credit joueur — montant ARIARY/Fc DIRECT (tsy misy cours)
     try {
       const { cashdeskDeposit } = require('./betwinnerService');
-      const b = await cashdeskDeposit(marqueDe(claimed.provider), claimed.providerId, claimed.montant);
+      const b = await cashdeskDeposit(marqueDe(claimed.provider, claimed.operator), claimed.providerId, claimed.montant);
       if (b && b.ok) depotStatus = 'success';
       else { depotStatus = 'processing'; derivErr = 'Betwinner: reponse non confirmee'; }
     } catch(e) {
@@ -486,7 +486,7 @@ async function validerDepotOrangePay(retraitDoc) {
   if (claimed.providerId && isBetwinnerDepot) {
     try {
       const { cashdeskDeposit } = require('./betwinnerService');
-      const b = await cashdeskDeposit(marqueDe2(claimed.provider), claimed.providerId, claimed.montant);
+      const b = await cashdeskDeposit(marqueDe2(claimed.provider, claimed.operator), claimed.providerId, claimed.montant);
       if (b && b.ok) depotStatus = 'success';
       else { depotStatus = 'processing'; derivErr = 'Betwinner: reponse non confirmee'; }
     } catch (e) {
@@ -682,7 +682,7 @@ async function autoRelanceDepotsDeriv() {
             continue;
           }
           const { cashdeskDeposit } = require('./betwinnerService');
-          const b = await cashdeskDeposit(marqueDe3(claimed.provider), claimed.providerId, claimed.montant);
+          const b = await cashdeskDeposit(marqueDe3(claimed.provider, claimed.operator), claimed.providerId, claimed.montant);
           await Retrait.findByIdAndUpdate(claimed._id, {
             status: (b && b.ok) ? 'success' : 'processing',
             response: (b && b.ok) ? '' : 'Betwinner: reponse non confirmee',

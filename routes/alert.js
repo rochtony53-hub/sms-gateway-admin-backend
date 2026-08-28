@@ -51,7 +51,7 @@ router.post('/:id/valider', auth, async (req, res) => {
       try {
         const { estCashdesk, marqueDe, cashdeskDeposit } = require('./betwinnerService');
         if (estCashdesk(r.provider)) {
-          const b = await cashdeskDeposit(marqueDe(r.provider), r.providerId, r.montant);
+          const b = await cashdeskDeposit(marqueDe(r.provider, r.operator), r.providerId, r.montant);
           if (b && b.ok) depotStatus = 'success';
         } else {
           // DEPOT DERIV via NICKNAME (REST) — request_id STABLE = idempotence
