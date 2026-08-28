@@ -136,6 +136,39 @@ router.get('/diag', auth, async (req, res) => {
         { nom: 'D s2 avec hash',               s1: 'hash=' + H + '&cashdeskid=' + C + '&dt=' + dt,
           s2: 'dt=' + dt + '&cashierpass=' + P + '&hash=' + H }
       ];
+      // Les 4 variantes ci-dessus ne font varier que le SIGN : le confirm y
+      // reste identique. Un confirm errone produirait donc le meme 403 partout,
+      // exactement comme un filtrage par IP. Pour distinguer les deux causes on
+      // essaie aussi plusieurs formules de confirm : si l'une passe, le probleme
+      // est dans le code ; si toutes echouent avec le meme 403, l'appel est
+      // refuse avant tout controle -- c'est alors une question d'autorisation.
+      const confirmVariants = [
+        { nom: 'cashdeskid:hash', val: md5(C + ':' + H) },
+        { nom: 'hash:cashdeskid', val: md5(H + ':' + C) },
+        { nom: 'cashdeskid:cashierpass', val: md5(C + ':' + P) },
+        { nom: 'hash seul', val: md5(String(H)) },
+        { nom: 'cashdeskid seul', val: md5(String(C)) }
+      ];
+      out.confirmVariants = [];
+      for (const cv of confirmVariants) {
+        const s1c = sha256('hash=' + H + '&cashdeskid=' + C + '&dt=' + dt);
+        const s2c = md5('dt=' + dt + '&cashierpass=' + P + '&cashdeskid=' + C);
+        const signc = sha256(s1c + s2c);
+        try {
+          const r = await fetch(BASE + '/Cashdesk/' + encodeURIComponent(C) +
+            '/Balance?confirm=' + cv.val + '&dt=' + encodeURIComponent(dt), { headers: { sign: signc } });
+          const txt = await r.text();
+          out.confirmVariants.push({
+            confirm: cv.nom, http: r.status,
+            resultat: r.status === 200 ? 'ACCEPTEE' : 'HTTP ' + r.status,
+            apercu: String(txt).slice(0, 100)
+          });
+          if (r.status === 200) { out.confirmValide = cv.nom; break; }
+        } catch (e) {
+          out.confirmVariants.push({ confirm: cv.nom, resultat: 'erreur reseau: ' + (e.message || '') });
+        }
+      }
+
       out.balanceVariants = [];
       for (const v of balVariants) {
         const sign = sha256(sha256(v.s1) + md5(v.s2));
