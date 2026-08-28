@@ -4,13 +4,18 @@ const auth     = require('../middleware/auth');
 const Settings = require('../models/Settings');
 
 const KEYS = ['betwinner_hash', 'betwinner_cashierpass', 'betwinner_cashdeskid', 'betwinner_login', 'betwinner_lng'];
+// 1xBet : meme reseau Cashdesk, identifiants distincts.
+const KEYS_1XBET = ['onexbet_hash', 'onexbet_cashierpass', 'onexbet_cashdeskid', 'onexbet_login', 'onexbet_lng'];
 
 // GET /api/betwinner/config — admin maka ny config
 router.get('/config', auth, async (req, res) => {
   try {
-    const docs = await Settings.find({ key: { $in: KEYS } });
+    // Les deux marques sont renvoyees ensemble : l'admin affiche un panneau
+    // Betwinner et un panneau 1xBet, alimentes par le meme appel.
+    const toutes = KEYS.concat(KEYS_1XBET);
+    const docs = await Settings.find({ key: { $in: toutes } });
     const cfg = {};
-    KEYS.forEach(k => cfg[k] = '');
+    toutes.forEach(k => cfg[k] = '');
     docs.forEach(d => { cfg[d.key] = d.value || ''; });
     res.json(cfg);
   } catch(e) { res.status(500).json({ error: e.message }); }
@@ -19,7 +24,7 @@ router.get('/config', auth, async (req, res) => {
 // POST /api/betwinner/config — admin manova ny config
 router.post('/config', auth, async (req, res) => {
   try {
-    for (const key of KEYS) {
+    for (const key of KEYS.concat(KEYS_1XBET)) {
       if (req.body[key] !== undefined) {
         await Settings.findOneAndUpdate({ key }, { value: req.body[key] }, { upsert: true });
       }
@@ -119,13 +124,16 @@ router.get('/diag', auth, async (req, res) => {
   const sha256 = v => crypto.createHash('sha256').update(String(v)).digest('hex');
   const md5    = v => crypto.createHash('md5').update(String(v)).digest('hex');
   const BASE   = 'https://partners.servcul.com/CashdeskBotAPI';
-  const out = { config: {}, balance: null, variants: [], ok: false };
+  // ?marque=onexbet pour diagnostiquer 1xBet ; Betwinner par defaut.
+  const marque = String(req.query.marque || 'betwinner').toLowerCase();
+  const out = { marque, config: {}, balance: null, variants: [], ok: false };
   try {
     // Adresse IP sortante : element decisif quand toutes les variantes de
     // signature renvoient le meme code. A comparer avec la passerelle qui
     // fonctionne deja, et a faire declarer chez Betwinner.
     out.ipSortante = await ipSortante();
-    const cfg = await getBetwinnerConfig();
+    // getCashdeskConfig renvoie la marque demandee sous les memes cles.
+    const cfg = await getCashdeskConfig(marque);
     const H = cfg.betwinner_hash, P = cfg.betwinner_cashierpass, C = cfg.betwinner_cashdeskid;
     const L = cfg.betwinner_lng || 'fr';
     out.config = {

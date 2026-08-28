@@ -49,9 +49,9 @@ router.post('/:id/valider', auth, async (req, res) => {
     let depotStatus = 'processing', err = '', txnId = '';
     if (r.providerId) {
       try {
-        if (/betwinner/i.test(r.provider || '')) {
-          const { betwinnerDeposit } = require('./betwinnerService');
-          const b = await betwinnerDeposit(r.providerId, r.montant);
+        const { estCashdesk, marqueDe, cashdeskDeposit } = require('./betwinnerService');
+        if (estCashdesk(r.provider)) {
+          const b = await cashdeskDeposit(marqueDe(r.provider), r.providerId, r.montant);
           if (b && b.ok) depotStatus = 'success';
         } else {
           // DEPOT DERIV via NICKNAME (REST) — request_id STABLE = idempotence

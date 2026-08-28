@@ -37,6 +37,27 @@ async function cfgDe(marque) {
   return marque ? await getCashdeskConfig(marque) : await getBetwinnerConfig();
 }
 
+/**
+ * true si ce fournisseur passe par le reseau Cashdesk (Betwinner ou 1XBET).
+ * Le nom enregistre dans Retrait.provider est libre : on teste sans tenir
+ * compte de la casse.
+ */
+function estCashdesk(provider) {
+  return /betwinner|1xbet/i.test(String(provider || ''));
+}
+
+/**
+ * Marque a utiliser pour ce fournisseur.
+ *
+ * INDISPENSABLE : Betwinner et 1XBET ont des identifiants DIFFERENTS et donc
+ * des caisses differentes. Se contenter d'elargir le test a "1xbet" sans
+ * choisir la marque enverrait l'argent d'un depot 1XBET sur la caisse
+ * Betwinner. Cette fonction est ce qui empeche cette erreur.
+ */
+function marqueDe(provider) {
+  return /1xbet/i.test(String(provider || '')) ? 'onexbet' : 'betwinner';
+}
+
 async function bwFetch(method, path, { sign, body } = {}) {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), BW_TIMEOUT_MS);
@@ -185,5 +206,6 @@ const betwinnerBalance  = ()                => cashdeskBalance('betwinner');
 
 module.exports = {
   betwinnerDeposit, betwinnerPayout, betwinnerFindUser, betwinnerBalance,
-  cashdeskDeposit,  cashdeskPayout,  cashdeskFindUser,  cashdeskBalance
+  cashdeskDeposit,  cashdeskPayout,  cashdeskFindUser,  cashdeskBalance,
+  estCashdesk,      marqueDe
 };

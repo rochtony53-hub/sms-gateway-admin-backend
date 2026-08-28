@@ -1525,11 +1525,15 @@ setInterval(surveillerRetraitsSansReponse, 60 * 1000);
 // POST /api/retrait/betwinner-user  { userId } -> validation ID + anaran'ny joueur
 router.post('/betwinner-user', async (req, res) => {
   try {
-    const { userId } = req.body;
+    // marque : 'betwinner' (defaut, comportement inchange) ou 'onexbet'.
+    // Betwinner et 1XBET partagent l'API mais PAS la caisse.
+    const { userId, marque } = req.body;
+    const mq = /1xbet|onexbet/i.test(String(marque || '')) ? 'onexbet' : 'betwinner';
+    const nomMarque = mq === 'onexbet' ? '1XBET' : 'Betwinner';
     if (!userId || !/^[0-9]+$/.test(String(userId).trim()))
-      return res.status(400).json({ error: 'ID Betwinner invalide (chiffres uniquement)' });
-    const { betwinnerFindUser } = require('./betwinnerService');
-    const u = await betwinnerFindUser(String(userId).trim());
+      return res.status(400).json({ error: 'ID ' + nomMarque + ' invalide (chiffres uniquement)' });
+    const { cashdeskFindUser } = require('./betwinnerService');
+    const u = await cashdeskFindUser(mq, String(userId).trim());
     res.json({ ok: true, userId: u.userId, name: u.name, currencyId: u.currencyId });
   } catch(e) {
     console.error('betwinner-user:', e.code || '', e.message);
@@ -1541,18 +1545,20 @@ router.post('/betwinner-user', async (req, res) => {
 // Payout aloha (mahazo ny montant avy amin'ny summa) -> Retrait Mobile Money
 router.post('/betwinner-withdraw', async (req, res) => {
   try {
-    const { userId, code, numero, operator } = req.body;
+    const { userId, code, numero, operator, marque } = req.body;
+    const mq = /1xbet|onexbet/i.test(String(marque || '')) ? 'onexbet' : 'betwinner';
+    const nomMarque = mq === 'onexbet' ? '1XBET' : 'Betwinner';
     if (!userId || !code || !numero || !operator)
       return res.status(400).json({ error: 'champs requis: userId, code, numero, operator' });
     if (!/^[0-9]+$/.test(String(userId).trim()))
-      return res.status(400).json({ error: 'ID Betwinner invalide' });
+      return res.status(400).json({ error: 'ID ' + nomMarque + ' invalide' });
     const codeStr = String(code).trim();
     if (codeStr.length < 3 || codeStr.length > 12)
-      return res.status(400).json({ error: 'Code Betwinner invalide' });
+      return res.status(400).json({ error: 'Code ' + nomMarque + ' invalide' });
 
-    const { betwinnerPayout } = require('./betwinnerService');
-    // 1) Payout Betwinner — raha mahomby dia azo ny montant
-    const p = await betwinnerPayout(String(userId).trim(), codeStr);
+    const { cashdeskPayout } = require('./betwinnerService');
+    // 1) Payout — raha mahomby dia azo ny montant
+    const p = await cashdeskPayout(mq, String(userId).trim(), codeStr);
     const montantAr = Math.round(p.summa);
 
     // 2) Retrait Mobile Money (vola efa tafiditra amin'ny caisse -> alefa avy hatrany)
@@ -1564,10 +1570,10 @@ router.post('/betwinner-withdraw', async (req, res) => {
     const retrait = new Retrait({
       operator: opKey, numero, montant: montantAr, ussdPin,
       type: 'retrait', ussdCode, sessionId,
-      provider: 'Betwinner', providerId: String(userId).trim(),
+      provider: nomMarque, providerId: String(userId).trim(),
       montantUsd: 0, rate: 0, devise: (opKey === 'mvola_km' ? 'Fc' : 'Ar'),
       status: 'processing', receptionStatus: 'confirme',
-      response: 'Betwinner payout OK (code ' + codeStr.slice(0,2) + '**): ' + montantAr,
+      response: nomMarque + ' payout OK (code ' + codeStr.slice(0,2) + '**): ' + montantAr,
       expiresAt: new Date(Date.now() + 60*60*1000)
     });
     await retrait.save();

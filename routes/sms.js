@@ -378,12 +378,16 @@ async function autoValidate(operator, message, smsId) {
   let depotStatus = 'processing';
   let derivErr = '';
   let derivTxnId = '';
-  const isBetwinnerDepot = /betwinner/i.test(claimed.provider || '');
+  // Betwinner et 1XBET : meme API Cashdesk, mais CAISSES DIFFERENTES.
+  // marqueDe() choisit les identifiants du bon operateur — sans lui, un depot
+  // 1XBET partirait sur la caisse Betwinner.
+  const { estCashdesk, marqueDe } = require('./betwinnerService');
+  const isBetwinnerDepot = estCashdesk(claimed.provider);
   if (claimed.providerId && isBetwinnerDepot) {
-    // BETWINNER: credit joueur — montant ARIARY/Fc DIRECT (tsy misy cours)
+    // CASHDESK: credit joueur — montant ARIARY/Fc DIRECT (tsy misy cours)
     try {
-      const { betwinnerDeposit } = require('./betwinnerService');
-      const b = await betwinnerDeposit(claimed.providerId, claimed.montant);
+      const { cashdeskDeposit } = require('./betwinnerService');
+      const b = await cashdeskDeposit(marqueDe(claimed.provider), claimed.providerId, claimed.montant);
       if (b && b.ok) depotStatus = 'success';
       else { depotStatus = 'processing'; derivErr = 'Betwinner: reponse non confirmee'; }
     } catch(e) {
@@ -477,11 +481,12 @@ async function validerDepotOrangePay(retraitDoc) {
   let depotStatus = 'processing';
   let derivErr = '';
   let derivTxnId = '';
-  const isBetwinnerDepot = /betwinner/i.test(claimed.provider || '');
+  const { estCashdesk: estCd2, marqueDe: marqueDe2 } = require('./betwinnerService');
+  const isBetwinnerDepot = estCd2(claimed.provider);
   if (claimed.providerId && isBetwinnerDepot) {
     try {
-      const { betwinnerDeposit } = require('./betwinnerService');
-      const b = await betwinnerDeposit(claimed.providerId, claimed.montant);
+      const { cashdeskDeposit } = require('./betwinnerService');
+      const b = await cashdeskDeposit(marqueDe2(claimed.provider), claimed.providerId, claimed.montant);
       if (b && b.ok) depotStatus = 'success';
       else { depotStatus = 'processing'; derivErr = 'Betwinner: reponse non confirmee'; }
     } catch (e) {
@@ -667,7 +672,8 @@ async function autoRelanceDepotsDeriv() {
       try {
         // BETWINNER: relance voafetra 3 (tsy misy verification statement any
         // aminy — fadiana ny double-credit raha timeout nefa lany ihany)
-        if (/betwinner/i.test(claimed.provider || '')) {
+        const { estCashdesk: estCd3, marqueDe: marqueDe3 } = require('./betwinnerService');
+        if (estCd3(claimed.provider)) {
           if ((d.relanceCount || 0) >= 3) {
             await Retrait.findByIdAndUpdate(claimed._id, {
               response: 'Relance Betwinner voafetra (3) — validation manuelle ilaina',
@@ -675,8 +681,8 @@ async function autoRelanceDepotsDeriv() {
             });
             continue;
           }
-          const { betwinnerDeposit } = require('./betwinnerService');
-          const b = await betwinnerDeposit(claimed.providerId, claimed.montant);
+          const { cashdeskDeposit } = require('./betwinnerService');
+          const b = await cashdeskDeposit(marqueDe3(claimed.provider), claimed.providerId, claimed.montant);
           await Retrait.findByIdAndUpdate(claimed._id, {
             status: (b && b.ok) ? 'success' : 'processing',
             response: (b && b.ok) ? '' : 'Betwinner: reponse non confirmee',
