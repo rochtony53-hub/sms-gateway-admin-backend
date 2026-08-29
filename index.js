@@ -66,6 +66,8 @@ app.use('/api/settings', require('./routes/settings'));
 app.use('/api/solde',   require('./routes/solde'));
 app.use('/api/deriv',   require('./routes/deriv'));
 app.use('/api/betwinner', require('./routes/betwinner'));
+// Annonces affichees aux clients (cloche du site vitrine).
+app.use('/api/announcements', require('./routes/announcement'));
 // Orange Money Web Payment. /pay/go est monte a la RACINE (pas sous /api) :
 // c'est l'url donnee au client, elle doit rester courte et neutre.
 app.use('/api/orange-pay', require('./routes/orangePay'));
