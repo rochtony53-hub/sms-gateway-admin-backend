@@ -8,13 +8,16 @@ const KEYS = ['betwinner_hash', 'betwinner_cashierpass', 'betwinner_cashdeskid',
 const KEYS_1XBET = ['onexbet_hash', 'onexbet_cashierpass', 'onexbet_cashdeskid', 'onexbet_login', 'onexbet_lng'];
 // 1XBET Comores : troisieme caisse, en Fc.
 const KEYS_1XBET_KM = ['onexbet_km_hash', 'onexbet_km_cashierpass', 'onexbet_km_cashdeskid', 'onexbet_km_login', 'onexbet_km_lng'];
+// 1WIN : reseau different (api.1win.win), une seule cle suffit. Range ici pour
+// que l'admin lise et enregistre tous les fournisseurs par le meme appel.
+const KEYS_1WIN = ['onewin_apikey'];
 
 // GET /api/betwinner/config — admin maka ny config
 router.get('/config', auth, async (req, res) => {
   try {
     // Les deux marques sont renvoyees ensemble : l'admin affiche un panneau
     // Betwinner et un panneau 1xBet, alimentes par le meme appel.
-    const toutes = KEYS.concat(KEYS_1XBET).concat(KEYS_1XBET_KM);
+    const toutes = KEYS.concat(KEYS_1XBET).concat(KEYS_1XBET_KM).concat(KEYS_1WIN);
     const docs = await Settings.find({ key: { $in: toutes } });
     const cfg = {};
     toutes.forEach(k => cfg[k] = '');
@@ -26,7 +29,7 @@ router.get('/config', auth, async (req, res) => {
 // POST /api/betwinner/config — admin manova ny config
 router.post('/config', auth, async (req, res) => {
   try {
-    for (const key of KEYS.concat(KEYS_1XBET).concat(KEYS_1XBET_KM)) {
+    for (const key of KEYS.concat(KEYS_1XBET).concat(KEYS_1XBET_KM).concat(KEYS_1WIN)) {
       if (req.body[key] !== undefined) {
         await Settings.findOneAndUpdate({ key }, { value: req.body[key] }, { upsert: true });
       }
