@@ -318,7 +318,10 @@ router.post('/', auth, async (req, res) => {
     const isKm = getOpKey(operator) === 'mvola_km';
     let montantUsd = 0, rate = 0, devise = isKm ? 'Fc' : 'Ar';
     let montantFinal = montantSaisi;
-    if (provider && provider.toLowerCase() === 'deriv') {
+    // Deriv ET 1WIN tiennent leur caisse en dollars : le montant saisi en
+    // Ariary (ou Fc) doit etre converti au cours du jour. Betwinner et 1XBET,
+    // eux, travaillent directement en monnaie locale et ne passent pas ici.
+    if (provider && /^(deriv|1win)$/i.test(provider.trim())) {
       const rates = await getRates();
       rate = (type === 'depot')
         ? (isKm ? rates.rate_depot_km : rates.rate_depot)
@@ -415,7 +418,10 @@ router.post('/', auth, async (req, res) => {
     // (server-side automatique, tsy webview/client). DEPOT = client mandefa
     // USSD ny tenany (numeroGateway efa hita ao amin'ny ussdCode).
     if (type === 'retrait') {
-      if (provider && provider.toLowerCase() === 'deriv') {
+      // Deriv ET 1WIN tiennent leur caisse en dollars : le montant saisi en
+    // Ariary (ou Fc) doit etre converti au cours du jour. Betwinner et 1XBET,
+    // eux, travaillent directement en monnaie locale et ne passent pas ici.
+    if (provider && /^(deriv|1win)$/i.test(provider.trim())) {
         // Safidy 1: miandry credited (poll statement) vao mandefa Mobile Money.
       } else {
         dispatchUssdRetrait(retrait).catch(e => console.error('dispatchUssdRetrait:', e));
@@ -1292,6 +1298,68 @@ router.post('/:id/relancer', auth, async (req, res) => {
 
     res.json({ ok: true, relanceCount: updated.relanceCount + 1 });
   } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+/* ============================================================
+ * RETRAIT 1WIN
+ *   Le joueur donne son ID et un code. 1WIN renvoie le montant EN DOLLARS ;
+ *   on le convertit au cours du jour (Ariary, ou Franc comorien pour mvola_km)
+ *   avant d'envoyer le Mobile Money -- exactement comme pour Deriv.
+ *   Une seule caisse : la cle API est la meme partout.
+ * ============================================================ */
+router.post('/onewin-withdraw', async (req, res) => {
+  try {
+    const { userId, code, numero, operator } = req.body;
+    if (!userId || !code || !numero || !operator)
+      return res.status(400).json({ error: 'champs requis: userId, code, numero, operator' });
+    if (!/^[0-9]+$/.test(String(userId).trim()))
+      return res.status(400).json({ error: 'ID 1WIN invalide (chiffres uniquement)' });
+    const codeStr = String(code).trim();
+    if (!/^[0-9]+$/.test(codeStr))
+      return res.status(400).json({ error: 'Code 1WIN invalide (chiffres uniquement)' });
+
+    const opKey = getOpKey(operator) || operator;
+    const isKm  = opKey === 'mvola_km';
+
+    // Le cours est lu AVANT l'appel : sans cours, mieux vaut refuser que
+    // valider un retrait qu'on ne saurait pas convertir ensuite.
+    const rates = await getRates();
+    const rate  = isKm ? rates.rate_retrait_km : rates.rate_retrait;
+    if (!rate || rate <= 0)
+      return res.status(400).json({ error: isKm
+        ? 'Cours Comores (Fc) non configuré — voir Paramètres admin'
+        : 'Cours retrait non configuré — voir Paramètres admin' });
+
+    const { onewinWithdrawal } = require('./onewinService');
+    // 1) Validation du code : c'est 1WIN qui donne le montant, pas le client.
+    const w = await onewinWithdrawal(String(userId).trim(), codeStr);
+    const montantLocal = Math.round(w.amountUsd * rate);
+    if (montantLocal <= 0)
+      return res.status(400).json({ error: 'Montant converti nul — vérifiez le cours' });
+
+    // 2) Mobile Money : l'argent est deja sorti de la caisse 1WIN, on envoie.
+    const template  = await getUssdCode(operator, 'retrait');
+    const ussdCode  = await buildUssd(template, numero, montantLocal, null, opKey);
+    const ussdPin   = await getSeparatePin(template, opKey);
+    const sessionId = genSession();
+    const retrait = new Retrait({
+      operator: opKey, numero, montant: montantLocal, ussdPin,
+      type: 'retrait', ussdCode, sessionId,
+      provider: '1WIN', providerId: String(userId).trim(),
+      montantUsd: w.amountUsd, rate, devise: (isKm ? 'Fc' : 'Ar'),
+      status: 'processing', receptionStatus: 'confirme',
+      response: '1WIN retrait OK (code ' + codeStr.slice(0,2) + '**): '
+              + w.amountUsd + ' USD -> ' + montantLocal + (isKm ? ' Fc' : ' Ar'),
+      expiresAt: new Date(Date.now() + 60*60*1000)
+    });
+    await retrait.save();
+    dispatchUssdRetrait(retrait).catch(e2 => console.error('dispatchUssdRetrait (1win):', e2));
+
+    res.json({ ok: true, id: retrait._id, sessionId, montantAr: montantLocal, montantUsd: w.amountUsd });
+  } catch(e) {
+    console.error('onewin-withdraw:', e.code || '', e.message);
+    res.status(400).json({ error: e.message, code: e.code || '' });
+  }
 });
 
 // FIX: relance automatique isaky 15 min raha mbola "failed" ny retrait

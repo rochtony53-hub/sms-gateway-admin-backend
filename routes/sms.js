@@ -395,6 +395,22 @@ async function autoValidate(operator, message, smsId) {
       depotStatus = 'processing';
       derivErr = e.message;
     }
+  } else if (claimed.providerId && /1win/i.test(claimed.provider || '')) {
+    // DEPOT 1WIN : caisse en USD, comme Deriv. Le montant Ariary (ou Fc) paye
+    // par le client a deja ete converti a la creation de l'ordre : on envoie
+    // montantUsd, jamais le montant en monnaie locale.
+    try {
+      const { onewinDeposit } = require('./onewinService');
+      const usd = Number(claimed.montantUsd);
+      if (!isFinite(usd) || usd <= 0) throw new Error('montantUsd absent — conversion manquante');
+      const w = await onewinDeposit(claimed.providerId, usd);
+      depotStatus = 'success';
+      derivTxnId = String(w.id || '');
+    } catch (e) {
+      console.error('onewinDeposit error pour depot', claimed._id, ':', e.message);
+      depotStatus = 'processing';
+      derivErr = e.message;
+    }
   } else if (claimed.providerId) {
     try {
       // DEPOT DERIV via NICKNAME (REST Payment Agent /transfer).
