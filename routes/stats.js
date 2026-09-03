@@ -1,4 +1,5 @@
 const router = require('express').Router();
+const role = require('../middleware/role');
 const auth   = require('../middleware/auth');
 const apikey = require('../middleware/apikey');
 const Sms    = require('../models/Sms');
@@ -6,7 +7,7 @@ const Retrait= require('../models/Retrait');
 const Device = require('../models/Device');
 const Solde  = require('../models/Solde');
 
-router.get('/dashboard', auth, async (req, res) => {
+router.get('/dashboard', auth, role('admin','superadmin'), async (req, res) => {
   try {
     const now   = new Date();
     const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
@@ -113,7 +114,7 @@ router.delete('/reset', auth, async (req, res) => {
 });
 
 // GET /api/stats/solde-all — debug: voir tous les soldes (incl. debug entries)
-router.get('/solde-all', auth, async (req, res) => {
+router.get('/solde-all', auth, role('admin','superadmin'), async (req, res) => {
   try {
     const all = await Solde.find();
     res.json(all);
