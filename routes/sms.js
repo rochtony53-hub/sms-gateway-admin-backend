@@ -151,7 +151,7 @@ function versNombre(brut) {
 const MOTIFS_SOLDE = [
   /nouveau\s*solde\s*[:=]?\s*([0-9][0-9\s.,]{0,15})/i,
   /solde\s*(?:actuel|restant|disponible)\s*[:=]?\s*([0-9][0-9\s.,]{0,15})/i,
-  /votre\s*solde\s*est\s*(?:de)?\s*[:=]?\s*([0-9][0-9\s.,]{0,15})/i,
+  /votre\s*solde(?:\s+\S+){0,2}\s*est\s*(?:de)?\s*[:=]?\s*([0-9][0-9\s.,]{0,15})/i,
   /solde\s*[:=]\s*([0-9][0-9\s.,]{0,15})/i,
   /volanao\s*(?:sisa)?\s*[:=]?\s*([0-9][0-9\s.,]{0,15})/i
 ];
