@@ -223,6 +223,13 @@ async function autoValidate(operator, message, smsId) {
 
   await expireOldRetraits(opKey);
 
+  // Tout SMS annoncant un solde fait foi, meme sans ordre associe
+  // (ex: consultation de solde). C'est un constat reel de l'operateur.
+  try {
+    const sAnn = lireSoldeAnnonce(message);
+    if (sAnn != null) await require('./soldeService').soldeVerifie(opKey, sAnn, 'sms solde', message);
+  } catch (e) { console.error('solde depuis SMS:', e.message); }
+
   const result = await checkTemplate(opKey, message);
 
   if (result === null) {
