@@ -1062,6 +1062,13 @@ const DEPART_CONFIRME_PATTERNS = [
   //  repertoire MVola, Entrer le nom correspondant ou ignorer :"
   /transaction\s+a\s+r[eé]ussi/i,
   /r[eé]pertoire\s+mvola/i,
+  // --- Airtel Money ---
+  // Apres un transfert REUSSI, Airtel propose : "Enregistrer ce numero
+  // comme favori? 1. Oui 2. Non". Non reconnu, ce texte tombait en
+  // 'inconnu' et le retrait passait en echec alors que l'argent etait
+  // parti. L'APK ferme deja cet ecran par ANNULER.
+  /comme\s+favori/i,
+  /enregistrer\s+ce\s+num[eé]ro/i,
   // --- commun ---
   /transaction\s*en\s*cours/i,
   /nahomby/i
