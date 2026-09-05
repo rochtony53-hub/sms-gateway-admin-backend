@@ -1321,9 +1321,12 @@ router.post('/onewin-withdraw', async (req, res) => {
       return res.status(400).json({ error: 'champs requis: userId, code, numero, operator' });
     if (!/^[0-9]+$/.test(String(userId).trim()))
       return res.status(400).json({ error: 'ID 1WIN invalide (chiffres uniquement)' });
+    // Le format exact du code 1WIN n'est pas documente : on verifie seulement
+    // qu'il est present et de longueur plausible. C'est 1WIN qui tranche —
+    // refuser ici un code valide couterait un retrait au client.
     const codeStr = String(code).trim();
-    if (!/^[0-9]+$/.test(codeStr))
-      return res.status(400).json({ error: 'Code 1WIN invalide (chiffres uniquement)' });
+    if (codeStr.length < 3 || codeStr.length > 16)
+      return res.status(400).json({ error: 'Code 1WIN invalide' });
 
     const opKey = getOpKey(operator) || operator;
     const isKm  = opKey === 'mvola_km';

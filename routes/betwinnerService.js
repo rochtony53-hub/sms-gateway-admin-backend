@@ -134,12 +134,15 @@ async function cashdeskPayout(marque, userId, code) {
     body: { cashdeskId: Number(cfg.betwinner_cashdeskid), lng, code: String(code), confirm }
   });
   if (!data || data.success !== true) {
-    const e = new Error((data && data.message) || 'Code Betwinner invalide ou payout refusé');
+    // Le message nommait toujours Betwinner : un client 1XBET croyait s'etre
+    // trompe de fournisseur. On reprend la marque reellement utilisee.
+    const nom = marque === 'onexbet' ? '1XBET' : (marque === 'onexbet_km' ? '1XBET' : 'Betwinner');
+    const e = new Error((data && data.message) || ('Code ' + nom + ' invalide ou payout refusé'));
     e.code = 'PayoutRefused'; e.messageId = data && data.messageId; e.raw = data;
     throw e;
   }
   const summa = Math.abs(Number(data.summa) || 0);
-  if (!summa) { const e = new Error('Payout Betwinner sans montant (summa vide)'); e.code='PayoutNoAmount'; e.raw=data; throw e; }
+  if (!summa) { const e = new Error('Payout sans montant (summa vide)'); e.code='PayoutNoAmount'; e.raw=data; throw e; }
   return { ok: true, summa, raw: data };
 }
 
