@@ -141,6 +141,7 @@ function versNombre(brut) {
   if (brut == null) return null;
   let t = String(brut).trim();
   // Separateur decimal a 2 chiffres en fin : on le retire (montants en Ariary)
+  t = t.replace(/[.,\s]+$/, '');            // ponctuation de fin de phrase
   t = t.replace(/[.,](\d{2})\s*$/, '');
   t = t.replace(/[^0-9]/g, '');
   if (!t) return null;
@@ -148,12 +149,15 @@ function versNombre(brut) {
   return Number.isFinite(n) ? n : null;
 }
 
+// La devise precede parfois le montant : "est de Ar 128951.95".
+const _DEV = '(?:ar|fc|mga|kmf|ariary|francs?)?\\s*';
+const _NB  = '([0-9][0-9\\s.,]{0,15})';
 const MOTIFS_SOLDE = [
-  /nouveau\s*solde\s*[:=]?\s*([0-9][0-9\s.,]{0,15})/i,
-  /solde\s*(?:actuel|restant|disponible)\s*[:=]?\s*([0-9][0-9\s.,]{0,15})/i,
-  /votre\s*solde(?:\s+\S+){0,2}\s*est\s*(?:de)?\s*[:=]?\s*([0-9][0-9\s.,]{0,15})/i,
-  /solde\s*[:=]\s*([0-9][0-9\s.,]{0,15})/i,
-  /volanao\s*(?:sisa)?\s*[:=]?\s*([0-9][0-9\s.,]{0,15})/i
+  new RegExp('nouveau\\s*solde\\s*[:=]?\\s*' + _DEV + _NB, 'i'),
+  new RegExp('solde\\s*(?:actuel|restant|disponible)\\s*[:=]?\\s*' + _DEV + _NB, 'i'),
+  new RegExp('votre\\s*solde(?:\\s+\\S+){0,2}\\s*est\\s*(?:de)?\\s*[:=]?\\s*' + _DEV + _NB, 'i'),
+  new RegExp('solde\\s*[:=]\\s*' + _DEV + _NB, 'i'),
+  new RegExp('volanao\\s*(?:sisa)?\\s*[:=]?\\s*' + _DEV + _NB, 'i')
 ];
 
 /** Solde annonce par l'operateur, ou null si absent/illisible. */
