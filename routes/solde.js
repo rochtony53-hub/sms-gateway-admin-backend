@@ -36,23 +36,25 @@ function extractAmount(text) {
     }
   }
 
-  // Fallback: premier nombre trouvé dans le texte
-  const pattern = /\d{1,3}(?:[\s.]\d{3})*(?:,\d{1,2})?/g;
+  // Fallback: premier nombre trouvé dans le texte.
+  //
+  // L'ancien motif exigeait un separateur de milliers : sur "Ar 128686.95" il
+  // ne prenait que "128" et le solde tombait de 128 686 a 128 Ar. On lit donc
+  // toute suite de chiffres, on retire la ponctuation de fin de phrase puis la
+  // decimale a deux chiffres, quel que soit le separateur.
+  const pattern = /\d[\d\s.,]{0,18}/g;
   const matches = text.match(pattern);
   if (!matches || !matches.length) return null;
 
   const amounts = matches.map(raw => {
-    let s = raw.trim();
-    let decimalPart = '';
-    const commaIdx = s.indexOf(',');
-    if (commaIdx >= 0) {
-      decimalPart = s.substring(commaIdx + 1);
-      s = s.substring(0, commaIdx);
-    }
-    const intPart = s.replace(/[\s.]/g, '');
-    const num = parseFloat(intPart + (decimalPart ? '.' + decimalPart : ''));
-    return isNaN(num) ? null : num;
-  }).filter(n => n !== null);
+    let s = String(raw).trim();
+    s = s.replace(/[.,\s]+$/, '');
+    s = s.replace(/[.,]\d{1,2}$/, '');
+    s = s.replace(/[^0-9]/g, '');
+    if (!s) return null;
+    const num = parseInt(s, 10);
+    return Number.isFinite(num) ? num : null;
+  }).filter(n => n !== null && n >= 0 && n < 1000000000);
 
   if (!amounts.length) return null;
   return Math.round(amounts[0]); // Premier montant trouvé
