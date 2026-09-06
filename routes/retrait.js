@@ -383,6 +383,8 @@ router.post('/', auth, async (req, res) => {
       expiresAt: new Date(Date.now() + 60*60*1000) // FIX: 1h limite de validite
     });
     await retrait.save();
+    // Fil Telegram : l'ordre part des sa creation, avant meme le paiement.
+    try { require('../utils/telegram').notifierTransaction('nouveau', retrait); } catch(e){}
 
     // ===== FENETRE 1h: vola nalefa MIALOHA ny ordre =====
     // Raha nisy SMS "matched" (template OK fa tsy nisy ordre tamin'izay) tao
@@ -883,6 +885,9 @@ async function dispatchUssdRetrait(retrait) {
       await Retrait.findByIdAndUpdate(retrait._id, {
         status: 'failed', response: motif, updatedAt: new Date()
       });
+      // Canal dedie : un retrait bloque demande une action humaine, il ne doit
+      // pas se noyer dans le fil des transactions reussies.
+      try { require('../utils/telegram').notifierRetraitErreur(retrait, motif); } catch(e){}
       return;
     }
 
@@ -903,6 +908,9 @@ async function dispatchUssdRetrait(retrait) {
       await Retrait.findByIdAndUpdate(retrait._id, {
         status: 'failed', response: motif, updatedAt: new Date()
       });
+      // Canal dedie : un retrait bloque demande une action humaine, il ne doit
+      // pas se noyer dans le fil des transactions reussies.
+      try { require('../utils/telegram').notifierRetraitErreur(retrait, motif); } catch(e){}
       return;
     }
 
@@ -920,6 +928,9 @@ async function dispatchUssdRetrait(retrait) {
       await Retrait.findByIdAndUpdate(retrait._id, {
         status: 'failed', response: motif, updatedAt: new Date()
       });
+      // Canal dedie : un retrait bloque demande une action humaine, il ne doit
+      // pas se noyer dans le fil des transactions reussies.
+      try { require('../utils/telegram').notifierRetraitErreur(retrait, motif); } catch(e){}
       return;
     }
 
@@ -964,6 +975,9 @@ async function dispatchUssdRetrait(retrait) {
       await Retrait.findByIdAndUpdate(retrait._id, {
         status: 'failed', response: motif, updatedAt: new Date()
       });
+      // Canal dedie : un retrait bloque demande une action humaine, il ne doit
+      // pas se noyer dans le fil des transactions reussies.
+      try { require('../utils/telegram').notifierRetraitErreur(retrait, motif); } catch(e){}
       return;
     }
 
