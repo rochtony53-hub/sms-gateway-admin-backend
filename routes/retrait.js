@@ -713,12 +713,22 @@ router.get('/:id/diag-ussd', auth, async (req, res) => {
 router.get('/:id/public-status', async (req, res) => {
   try {
     const r = await Retrait.findById(req.params.id)
-      .select('status receptionStatus montant devise operator provider response createdAt updatedAt');
+      .select('status receptionStatus montant devise operator provider response type derivTxnId createdAt updatedAt');
     if (!r) return res.status(404).json({ error: 'introuvable' });
     const st = String(r.status || '');
     // etape lisible par le client
     let etape = 'attente', msg = 'Traitement en cours…';
     if (st === 'pending')          { etape = 'deriv';    msg = 'Confirmation ' + (r.provider || 'fournisseur') + ' en cours…'; }
+    else if (st === 'processing' && r.type === 'depot'
+             && r.receptionStatus === 'confirme' && !r.derivTxnId) {
+      // Le paiement est bien arrive, mais le credit chez le fournisseur a
+      // echoue. Annoncer "envoi en cours" laissait le client attendre une
+      // operation qui ne repartira pas seule.
+      etape = 'fournisseur_ko';
+      msg = 'Paiement bien recu, mais le credit ' + (r.provider || 'fournisseur')
+          + " n'a pas abouti : " + (r.response || 'verification en cours')
+          + '. Notre equipe intervient.';
+    }
     else if (st === 'processing')  { etape = 'envoi';    msg = 'Envoi du mobile money en cours…'; }
     else if (st === 'success')     { etape = 'succes';   msg = 'Mobile money envoye avec succes.'; }
     else if (st === 'failed')      { etape = 'echec';    msg = r.response || 'Echec du retrait.'; }
@@ -1990,6 +2000,43 @@ router.post('/:id/valider', auth, async (req, res) => {
       return res.status(403).json({ error: 'Acces refuse: admin requis' });
     const cur = await Retrait.findById(req.params.id);
     if (!cur) return res.status(404).json({ error: 'Retrait non trouve' });
+
+    // ------------------------------------------------------------------
+    // Depot Deriv non credite : le bouton doit RELANCER le transfert, pas se
+    // contenter de marquer l'ordre reussi. Auparavant un depot dont le credit
+    // Deriv avait echoue (mauvais nickname, compte introuvable) etait declare
+    // 'success' alors que le client n'avait rien recu.
+    //
+    // Le request_id reprend l'_id, comme dans sms.js : Deriv deduplique, un
+    // transfert deja passe ne peut pas etre refait deux fois.
+    // ------------------------------------------------------------------
+    const estDepotDeriv = cur.type === 'depot'
+      && /deriv/i.test(String(cur.provider || ''))
+      && cur.providerId && !cur.derivTxnId;
+
+    if (estDepotDeriv) {
+      let txn = '', motif = '';
+      try {
+        const { restTransferToClient } = require('./derivRest');
+        const r = await restTransferToClient(
+          cur.providerId, cur.montantUsd || cur.montant, 'USD', 'dep' + String(cur._id));
+        if (r && r.ok) txn = r.transaction_id || 'ok';
+        else motif = 'Deriv: transfert ' + ((r && r.status) ? r.status : 'non confirme');
+      } catch (e) { motif = e.message; }
+
+      if (!txn) {
+        // Rien n'est valide : l'ordre reste en l'etat, l'admin voit pourquoi.
+        await Retrait.findByIdAndUpdate(cur._id, { response: motif, updatedAt: new Date() });
+        return res.status(400).json({
+          error: 'Credit Deriv impossible — ' + motif,
+          code: 'DerivKO', motif: motif
+        });
+      }
+      await Retrait.findByIdAndUpdate(cur._id, {
+        derivTxnId: txn, response: 'Credit Deriv effectue depuis l\'admin', updatedAt: new Date()
+      });
+    }
+
     if (cur.status !== 'success') {
       const delta = cur.type === 'depot' ? cur.montant : -cur.montant;
       await require('./soldeService')
