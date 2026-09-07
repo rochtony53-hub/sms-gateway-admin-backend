@@ -1768,7 +1768,39 @@ router.post('/betwinner-withdraw', async (req, res) => {
     const { cashdeskPayout } = require('./betwinnerService');
     // 1) Payout — raha mahomby dia azo ny montant
     const p = await cashdeskPayout(mq, String(userId).trim(), codeStr);
-    const montantAr = Math.round(p.summa);
+    const montantBrut = Math.round(p.summa);
+
+    // ------------------------------------------------------------------
+    // Frais de service, retenus sur les caisses malgaches uniquement.
+    // Les Comores fonctionnent en Franc comorien : un montant fixe en Ariary
+    // n'y aurait aucun sens, elles restent hors frais tant que leur tarif
+    // n'est pas arrete.
+    //
+    // Le client ne choisit pas le montant : il vient du code deja approuve
+    // chez le bookmaker. Un code trop petit pour couvrir les frais est donc
+    // possible — on le refuse et on rend l'argent, plutot que d'envoyer une
+    // somme negative ou nulle.
+    // ------------------------------------------------------------------
+    const FRAIS_RETRAIT_AR = 500;
+    const fraisDus = (mq === 'betwinner' || mq === 'onexbet') ? FRAIS_RETRAIT_AR : 0;
+
+    if (fraisDus && montantBrut <= fraisDus) {
+      let rendu = 'non';
+      try {
+        const { cashdeskDeposit } = require('./betwinnerService');
+        await cashdeskDeposit(mq, String(userId).trim(), montantBrut);
+        rendu = 'oui';
+      } catch (eRb) { console.error('remise apres montant insuffisant:', eRb.message); }
+      return res.status(400).json({
+        error: 'Montant du code (' + montantBrut + ' Ar) insuffisant : les frais de service '
+             + 'sont de ' + fraisDus + ' Ar.'
+             + (rendu === 'oui' ? ' La somme a ete remise sur votre compte de jeu.'
+                                : ' Contactez l\'equipe : la remise automatique a echoue.'),
+        code: 'MontantInsuffisant'
+      });
+    }
+
+    const montantAr = montantBrut - fraisDus;
 
     // ------------------------------------------------------------------
     // L'argent est SORTI de la caisse : on l'inscrit immediatement, avant
@@ -1781,7 +1813,9 @@ router.post('/betwinner-withdraw', async (req, res) => {
       type: 'retrait', provider: nomMarque, providerId: String(userId).trim(),
       montantUsd: 0, rate: 0, devise: ((getOpKey(operator) || operator) === 'mvola_km' ? 'Fc' : 'Ar'),
       status: 'pending', receptionStatus: 'confirme',
-      response: nomMarque + ' payout encaisse (operation ' + (p.raw && (p.raw.OperationId || p.raw.operationId) || '?')
+      response: nomMarque + ' payout encaisse ' + montantBrut + ' Ar'
+              + (fraisDus ? (' - frais ' + fraisDus + ' Ar = ' + montantAr + ' Ar') : '')
+              + ' (operation ' + (p.raw && (p.raw.OperationId || p.raw.operationId) || '?')
               + ') — envoi mobile money en preparation',
       expiresAt: new Date(Date.now() + 60*60*1000)
     });
@@ -1803,7 +1837,8 @@ router.post('/betwinner-withdraw', async (req, res) => {
     await retrait.save();
     dispatchUssdRetrait(retrait).catch(e2 => console.error('dispatchUssdRetrait (betwinner):', e2));
 
-    res.json({ ok: true, id: retrait._id, sessionId, montantAr });
+    res.json({ ok: true, id: retrait._id, sessionId, montantAr,
+               montantBrut, frais: fraisDus });
   } catch(e) {
     console.error('betwinner-withdraw:', e.code || '', e.message);
     res.status(400).json({ error: e.message, code: e.code || '' });
