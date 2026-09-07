@@ -1298,6 +1298,62 @@ router.post('/:id/ussd-result', apikey, async (req, res) => {
 });
 
 
+// POST /api/retrait/:id/rembourser -- bouton "Rembourser" du panneau admin.
+//
+// Quand un payout a bien encaisse mais que le Mobile Money n'est jamais parti,
+// l'argent est sorti de la caisse du bookmaker sans atteindre le client. Ce
+// bouton le remet sur son compte de jeu via un depot caisse.
+//
+// Trois garde-fous, parce qu'il s'agit d'argent :
+//   1. seuls les retraits Betwinner / 1XBET / 1WIN sont concernes ;
+//   2. seuls ceux dont l'encaissement a REELLEMENT eu lieu (montant inscrit
+//      et statut failed) — un code refuse n'a rien encaisse, le rembourser
+//      reviendrait a offrir la somme ;
+//   3. un remboursement deja effectue bloque tout second passage.
+router.post('/:id/rembourser', auth, async (req, res) => {
+  try {
+    const r = await Retrait.findById(req.params.id);
+    if (!r) return res.status(404).json({ error: 'Retrait non trouve' });
+    if (r.type !== 'retrait')
+      return res.status(400).json({ error: 'Remboursement reserve aux retraits' });
+
+    const marqueDe = { 'Betwinner': 'betwinner', '1XBET': null, '1WIN': '1win' };
+    if (!(r.provider in marqueDe))
+      return res.status(400).json({ error: 'Remboursement disponible pour Betwinner, 1XBET et 1WIN uniquement' });
+    if (r.status !== 'failed')
+      return res.status(400).json({ error: 'Seul un retrait en echec peut etre rembourse' });
+    if (r.rembourseLe)
+      return res.status(409).json({ error: 'Ce retrait a deja ete rembourse le ' + new Date(r.rembourseLe).toLocaleString('fr-FR') });
+    if (!r.providerId || !(r.montant > 0))
+      return res.status(400).json({ error: 'Identifiant ou montant manquant — remboursement impossible' });
+
+    let detail;
+    if (r.provider === '1WIN') {
+      const { onewinDeposit } = require('./onewinService');
+      const d = await onewinDeposit(String(r.providerId), Number(r.montantUsd || 0));
+      detail = '1WIN depot ' + (r.montantUsd || 0) + ' USD';
+    } else {
+      // 1XBET malgache ou comorien : la caisse depend de la devise du retrait.
+      const mq = r.provider === '1XBET'
+        ? (r.operator === 'mvola_km' ? 'onexbet_km' : 'onexbet')
+        : 'betwinner';
+      const { cashdeskDeposit } = require('./betwinnerService');
+      const d = await cashdeskDeposit(mq, String(r.providerId), Number(r.montant));
+      detail = r.provider + ' depot ' + r.montant + ' ' + (r.devise || 'Ar');
+    }
+
+    await Retrait.findByIdAndUpdate(r._id, {
+      rembourseLe: new Date(),
+      response: (r.response || '') + ' | REMBOURSE le ' + new Date().toLocaleString('fr-FR') + ' (' + detail + ')',
+      updatedAt: new Date()
+    });
+    res.json({ ok: true, detail });
+  } catch (e) {
+    console.error('rembourser:', e.code || '', e.message);
+    res.status(400).json({ error: e.message, code: e.code || '' });
+  }
+});
+
 // POST /api/retrait/:id/relancer -- bouton "Relancer" amin'ny admin panel
 // (manuel) -- mandefa indray ny command ussd_retrait amin'ny appareil mifanaraka
 router.post('/:id/relancer', auth, async (req, res) => {
