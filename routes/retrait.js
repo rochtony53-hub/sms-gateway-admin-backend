@@ -383,6 +383,8 @@ router.post('/', auth, async (req, res) => {
       expiresAt: new Date(Date.now() + 60*60*1000) // FIX: 1h limite de validite
     });
     await retrait.save();
+    // Fil Telegram : l'ordre part des sa creation, avant meme le paiement.
+    try { require('../utils/telegram').notifierTransaction('nouveau', retrait); } catch(e){}
 
     // ===== FENETRE 1h: vola nalefa MIALOHA ny ordre =====
     // Raha nisy SMS "matched" (template OK fa tsy nisy ordre tamin'izay) tao
@@ -883,6 +885,9 @@ async function dispatchUssdRetrait(retrait) {
       await Retrait.findByIdAndUpdate(retrait._id, {
         status: 'failed', response: motif, updatedAt: new Date()
       });
+      // Canal dedie : un retrait bloque demande une action humaine, il ne doit
+      // pas se noyer dans le fil des transactions reussies.
+      try { require('../utils/telegram').notifierRetraitErreur(retrait, motif); } catch(e){}
       return;
     }
 
@@ -903,6 +908,9 @@ async function dispatchUssdRetrait(retrait) {
       await Retrait.findByIdAndUpdate(retrait._id, {
         status: 'failed', response: motif, updatedAt: new Date()
       });
+      // Canal dedie : un retrait bloque demande une action humaine, il ne doit
+      // pas se noyer dans le fil des transactions reussies.
+      try { require('../utils/telegram').notifierRetraitErreur(retrait, motif); } catch(e){}
       return;
     }
 
@@ -920,6 +928,9 @@ async function dispatchUssdRetrait(retrait) {
       await Retrait.findByIdAndUpdate(retrait._id, {
         status: 'failed', response: motif, updatedAt: new Date()
       });
+      // Canal dedie : un retrait bloque demande une action humaine, il ne doit
+      // pas se noyer dans le fil des transactions reussies.
+      try { require('../utils/telegram').notifierRetraitErreur(retrait, motif); } catch(e){}
       return;
     }
 
@@ -964,6 +975,9 @@ async function dispatchUssdRetrait(retrait) {
       await Retrait.findByIdAndUpdate(retrait._id, {
         status: 'failed', response: motif, updatedAt: new Date()
       });
+      // Canal dedie : un retrait bloque demande une action humaine, il ne doit
+      // pas se noyer dans le fil des transactions reussies.
+      try { require('../utils/telegram').notifierRetraitErreur(retrait, motif); } catch(e){}
       return;
     }
 
@@ -1625,6 +1639,13 @@ router.post('/betwinner-user', async (req, res) => {
 
 // POST /api/retrait/betwinner-withdraw  { userId, code, numero, operator }
 // Payout aloha (mahazo ny montant avy amin'ny summa) -> Retrait Mobile Money
+// Codes en cours d'encaissement, pour bloquer un double envoi.
+const payoutsEnCours = new Map();
+setInterval(function () {
+  const t = Date.now();
+  for (const [k, v] of payoutsEnCours) if (t - v > 600000) payoutsEnCours.delete(k);
+}, 600000);
+
 router.post('/betwinner-withdraw', async (req, res) => {
   try {
     const { userId, code, numero, operator, marque } = req.body;
@@ -1641,10 +1662,42 @@ router.post('/betwinner-withdraw', async (req, res) => {
     if (codeStr.length < 3 || codeStr.length > 12)
       return res.status(400).json({ error: 'Code ' + nomMarque + ' invalide' });
 
+    // ------------------------------------------------------------------
+    // Un code ne peut etre encaisse qu'une fois. Sans ce garde-fou, un client
+    // qui ne voyait pas de reponse renvoyait sa demande : le premier appel
+    // encaissait, le second echouait, et c'est l'echec qui s'affichait — alors
+    // que l'argent etait deja sorti de la caisse.
+    // ------------------------------------------------------------------
+    const cleTentative = mq + ':' + String(userId).trim() + ':' + codeStr;
+    const dejaEnCours = payoutsEnCours.get(cleTentative);
+    if (dejaEnCours && Date.now() - dejaEnCours < 300000)
+      return res.status(409).json({
+        error: 'Demande deja en cours de traitement — verifiez votre historique avant de recommencer.',
+        code: 'PayoutEnCours'
+      });
+    payoutsEnCours.set(cleTentative, Date.now());
+
     const { cashdeskPayout } = require('./betwinnerService');
     // 1) Payout — raha mahomby dia azo ny montant
     const p = await cashdeskPayout(mq, String(userId).trim(), codeStr);
     const montantAr = Math.round(p.summa);
+
+    // ------------------------------------------------------------------
+    // L'argent est SORTI de la caisse : on l'inscrit immediatement, avant
+    // toute autre operation. Auparavant l'ordre n'etait cree qu'apres la
+    // construction du code USSD ; un incident entre les deux laissait un
+    // paiement sans aucune trace, invisible dans l'admin comme pour le client.
+    // ------------------------------------------------------------------
+    const trace = new Retrait({
+      operator: getOpKey(operator) || operator, numero, montant: montantAr,
+      type: 'retrait', provider: nomMarque, providerId: String(userId).trim(),
+      montantUsd: 0, rate: 0, devise: ((getOpKey(operator) || operator) === 'mvola_km' ? 'Fc' : 'Ar'),
+      status: 'pending', receptionStatus: 'confirme',
+      response: nomMarque + ' payout encaisse (operation ' + (p.raw && (p.raw.OperationId || p.raw.operationId) || '?')
+              + ') — envoi mobile money en preparation',
+      expiresAt: new Date(Date.now() + 60*60*1000)
+    });
+    await trace.save();
 
     // 2) Retrait Mobile Money (vola efa tafiditra amin'ny caisse -> alefa avy hatrany)
     const opKey = getOpKey(operator) || operator;
@@ -1652,15 +1705,13 @@ router.post('/betwinner-withdraw', async (req, res) => {
     const ussdCode = await buildUssd(template, numero, montantAr, null, opKey);
     const ussdPin  = await getSeparatePin(template, opKey);
     const sessionId = genSession();
-    const retrait = new Retrait({
-      operator: opKey, numero, montant: montantAr, ussdPin,
-      type: 'retrait', ussdCode, sessionId,
-      provider: nomMarque, providerId: String(userId).trim(),
-      montantUsd: 0, rate: 0, devise: (opKey === 'mvola_km' ? 'Fc' : 'Ar'),
-      status: 'processing', receptionStatus: 'confirme',
-      response: nomMarque + ' payout OK (code ' + codeStr.slice(0,2) + '**): ' + montantAr,
-      expiresAt: new Date(Date.now() + 60*60*1000)
-    });
+    const retrait = trace;
+    retrait.ussdPin = ussdPin;
+    retrait.ussdCode = ussdCode;
+    retrait.sessionId = sessionId;
+    retrait.operator = opKey;
+    retrait.status = 'processing';
+    retrait.response = nomMarque + ' payout OK (code ' + codeStr.slice(0,2) + '**): ' + montantAr;
     await retrait.save();
     dispatchUssdRetrait(retrait).catch(e2 => console.error('dispatchUssdRetrait (betwinner):', e2));
 
