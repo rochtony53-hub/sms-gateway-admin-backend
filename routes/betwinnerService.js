@@ -111,7 +111,7 @@ async function cashdeskDeposit(marque, userId, summaAr) {
     body: { cashdeskid: Number(cfg.betwinner_cashdeskid), lng, summa, confirm }
   });
   // Réponse attendue: { summa, success, messageId, message }
-  if (data && data.success === false) {
+  if (data && (data.Success === false || data.success === false)) {
     const e = new Error(data.message || ('Betwinner depot refusé (code ' + (data.messageId ?? '?') + ')'));
     e.code = 'DepositRefused'; e.messageId = data.messageId; e.raw = data;
     throw e;
@@ -133,15 +133,20 @@ async function cashdeskPayout(marque, userId, code) {
     sign,
     body: { cashdeskId: Number(cfg.betwinner_cashdeskid), lng, code: String(code), confirm }
   });
-  if (!data || data.success !== true) {
+  // L'API n'est pas constante sur la casse : le payout renvoie "Success" et
+  // "Summa" avec une majuscule. En ne lisant que la forme minuscule, un
+  // encaissement REUSSI etait declare refuse : l'argent sortait de la caisse
+  // sans qu'aucun ordre soit cree. cashdeskFindUser corrigeait deja ce piege.
+  const reussi = (data && (data.Success === true || data.success === true));
+  if (!reussi) {
     // Le message nommait toujours Betwinner : un client 1XBET croyait s'etre
     // trompe de fournisseur. On reprend la marque reellement utilisee.
     const nom = marque === 'onexbet' ? '1XBET' : (marque === 'onexbet_km' ? '1XBET' : 'Betwinner');
-    const e = new Error((data && data.message) || ('Code ' + nom + ' invalide ou payout refusé'));
+    const e = new Error((data && (data.Message || data.message)) || ('Code ' + nom + ' invalide ou payout refusé'));
     e.code = 'PayoutRefused'; e.messageId = data && data.messageId; e.raw = data;
     throw e;
   }
-  const summa = Math.abs(Number(data.summa) || 0);
+  const summa = Math.abs(Number(data.Summa != null ? data.Summa : data.summa) || 0);
   if (!summa) { const e = new Error('Payout sans montant (summa vide)'); e.code='PayoutNoAmount'; e.raw=data; throw e; }
   return { ok: true, summa, raw: data };
 }
