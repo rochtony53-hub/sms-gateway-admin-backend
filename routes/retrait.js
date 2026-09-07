@@ -1782,9 +1782,13 @@ router.post('/betwinner-withdraw', async (req, res) => {
     // somme negative ou nulle.
     // ------------------------------------------------------------------
     const FRAIS_RETRAIT_AR = 500;
+    // Sous ce seuil, ce qui resterait apres frais serait trop faible pour que
+    // l'operateur mobile money accepte l'envoi : le retrait echouerait apres
+    // coup, code consomme et argent bloque. Mieux vaut refuser tout de suite.
+    const MIN_CODE_AR = 1000;
     const fraisDus = (mq === 'betwinner' || mq === 'onexbet') ? FRAIS_RETRAIT_AR : 0;
 
-    if (fraisDus && montantBrut <= fraisDus) {
+    if (fraisDus && montantBrut < MIN_CODE_AR) {
       let rendu = 'non';
       try {
         const { cashdeskDeposit } = require('./betwinnerService');
@@ -1792,8 +1796,8 @@ router.post('/betwinner-withdraw', async (req, res) => {
         rendu = 'oui';
       } catch (eRb) { console.error('remise apres montant insuffisant:', eRb.message); }
       return res.status(400).json({
-        error: 'Montant du code (' + montantBrut + ' Ar) insuffisant : les frais de service '
-             + 'sont de ' + fraisDus + ' Ar.'
+        error: 'Montant du code (' + montantBrut + ' Ar) insuffisant : minimum '
+             + MIN_CODE_AR + ' Ar, dont ' + fraisDus + ' Ar de frais de service.'
              + (rendu === 'oui' ? ' La somme a ete remise sur votre compte de jeu.'
                                 : ' Contactez l\'equipe : la remise automatique a echoue.'),
         code: 'MontantInsuffisant'
