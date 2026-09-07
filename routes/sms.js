@@ -373,6 +373,12 @@ async function autoValidate(operator, message, smsId) {
       locked: false, updatedAt: new Date()
     });
     if (smsId) await Sms.findByIdAndUpdate(smsId, { status: 'matched', retraitId: claimed._id });
+    // Pour un retrait, le SMS de l'operateur est a la fois la preuve que
+    // l'argent est parti et la fin de l'operation : un seul message suffit.
+    try {
+      require('../utils/telegram').notifierTransaction('succes', claimed,
+        'SMS operateur recu' + (frais != null ? (' \u2014 frais ' + frais) : ''));
+    } catch(e){}
     return;
   }
 
@@ -459,6 +465,19 @@ async function autoValidate(operator, message, smsId) {
     locked: false, updatedAt: new Date()
   });
   if (smsId) await Sms.findByIdAndUpdate(smsId, { status: 'matched', retraitId: claimed._id });
+  // Depot : deux messages distincts. Le SMS prouve que l'argent est arrive
+  // chez nous ; le credit chez le fournisseur est une seconde etape, qui peut
+  // echouer alors meme que le paiement a bien ete recu.
+  try {
+    const tg = require('../utils/telegram');
+    tg.notifierTransaction('attente', claimed, 'Paiement recu \u2014 credit ' + claimed.provider + ' en cours');
+    if (depotStatus === 'success') {
+      tg.notifierTransaction('succes', claimed,
+        'Compte credite' + (derivTxnId ? (' \u2014 ref ' + derivTxnId) : ''));
+    } else {
+      tg.notifierDepotKo(claimed, derivErr || 'credit non confirme');
+    }
+  } catch(e){}
 }
 
 /* ============================================================================
