@@ -86,7 +86,9 @@ async function onewinWithdrawal(userId, code) {
     withdrawalId: Number(userId),
     code: Number(code)
   });
-  const montant = Number(d.amount);
+  // Comme chez Betwinner, la casse des champs n'est pas garantie : lire une
+  // seule ecriture ferait echouer un retrait pourtant encaisse.
+  const montant = Number(d.amount != null ? d.amount : d.Amount);
   if (!isFinite(montant) || montant <= 0) {
     const e = new Error('1WIN: montant de retrait absent de la reponse');
     e.code = 'OnewinNoAmount';

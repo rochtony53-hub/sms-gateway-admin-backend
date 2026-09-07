@@ -1354,6 +1354,18 @@ router.post('/onewin-withdraw', async (req, res) => {
         ? 'Cours Comores (Fc) non configuré — voir Paramètres admin'
         : 'Cours retrait non configuré — voir Paramètres admin' });
 
+    // Un code ne peut etre encaisse qu'une fois : sans ce garde-fou, un client
+    // qui ne voit pas de reponse renvoie sa demande et le premier encaissement
+    // reste sans trace.
+    const cle1w = '1win:' + String(userId).trim() + ':' + codeStr;
+    const enCours1w = payoutsEnCours.get(cle1w);
+    if (enCours1w && Date.now() - enCours1w < 300000)
+      return res.status(409).json({
+        error: 'Demande deja en cours de traitement — verifiez votre historique avant de recommencer.',
+        code: 'PayoutEnCours'
+      });
+    payoutsEnCours.set(cle1w, Date.now());
+
     const { onewinWithdrawal } = require('./onewinService');
     // 1) Validation du code : c'est 1WIN qui donne le montant, pas le client.
     const w = await onewinWithdrawal(String(userId).trim(), codeStr);
@@ -1361,21 +1373,31 @@ router.post('/onewin-withdraw', async (req, res) => {
     if (montantLocal <= 0)
       return res.status(400).json({ error: 'Montant converti nul — vérifiez le cours' });
 
+    // L'argent est SORTI de la caisse 1WIN : on l'inscrit avant toute autre
+    // etape. Un incident pendant la construction du code USSD laissait sinon
+    // un encaissement sans aucune trace, invisible dans l'admin.
+    const trace1w = new Retrait({
+      operator: opKey, numero, montant: montantLocal,
+      type: 'retrait', provider: '1WIN', providerId: String(userId).trim(),
+      montantUsd: w.amountUsd, rate, devise: (isKm ? 'Fc' : 'Ar'),
+      status: 'pending', receptionStatus: 'confirme',
+      response: '1WIN encaisse (' + w.amountUsd + ' USD) — envoi mobile money en preparation',
+      expiresAt: new Date(Date.now() + 60*60*1000)
+    });
+    await trace1w.save();
+
     // 2) Mobile Money : l'argent est deja sorti de la caisse 1WIN, on envoie.
     const template  = await getUssdCode(operator, 'retrait');
     const ussdCode  = await buildUssd(template, numero, montantLocal, null, opKey);
     const ussdPin   = await getSeparatePin(template, opKey);
     const sessionId = genSession();
-    const retrait = new Retrait({
-      operator: opKey, numero, montant: montantLocal, ussdPin,
-      type: 'retrait', ussdCode, sessionId,
-      provider: '1WIN', providerId: String(userId).trim(),
-      montantUsd: w.amountUsd, rate, devise: (isKm ? 'Fc' : 'Ar'),
-      status: 'processing', receptionStatus: 'confirme',
-      response: '1WIN retrait OK (code ' + codeStr.slice(0,2) + '**): '
-              + w.amountUsd + ' USD -> ' + montantLocal + (isKm ? ' Fc' : ' Ar'),
-      expiresAt: new Date(Date.now() + 60*60*1000)
-    });
+    const retrait = trace1w;
+    retrait.ussdPin = ussdPin;
+    retrait.ussdCode = ussdCode;
+    retrait.sessionId = sessionId;
+    retrait.status = 'processing';
+    retrait.response = '1WIN retrait OK (code ' + codeStr.slice(0,2) + '**): '
+              + w.amountUsd + ' USD -> ' + montantLocal + (isKm ? ' Fc' : ' Ar');
     await retrait.save();
     dispatchUssdRetrait(retrait).catch(e2 => console.error('dispatchUssdRetrait (1win):', e2));
 
