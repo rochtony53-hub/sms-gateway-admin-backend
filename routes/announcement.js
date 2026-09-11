@@ -51,6 +51,19 @@ router.post('/', auth, async (req, res) => {
       level: ['info','success','warning'].includes(req.body.level) ? req.body.level : 'info',
       expiresAt: req.body.expiresAt ? new Date(req.body.expiresAt) : null
     });
+    // Notification a tous les clients qui ont accepte : une annonce publiee
+    // que personne ne voit ne sert a rien. Volontairement sans await — la
+    // reponse a l'admin ne doit pas attendre des centaines d'envois.
+    (async () => {
+      try {
+        const U = require('../models/ClientPush');
+        const push = require('../utils/push');
+        const clients = await U.find({ 'fcmTokens.0': { $exists: true } }).select('_id').lean();
+        for (const c of clients) {
+          await push.notifierClient(U, c._id, a.title || 'MATULMADA', a.body, '/');
+        }
+      } catch (e) { console.warn('annonce push:', e.message); }
+    })();
     res.json({ ok: true, id: a._id });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });

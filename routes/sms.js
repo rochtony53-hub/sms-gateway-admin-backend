@@ -379,6 +379,16 @@ async function autoValidate(operator, message, smsId) {
       require('../utils/telegram').notifierTransaction('succes', claimed,
         'SMS operateur recu' + (frais != null ? (' \u2014 frais ' + frais) : ''));
     } catch(e){}
+    // Le client est prevenu sur son telephone, meme site ferme.
+    try {
+      if (claimed.clientId) {
+        const User = require('../models/ClientPush');
+        require('../utils/push').notifierClient(User, claimed.clientId,
+          'Retrait envoye',
+          Number(claimed.montant).toLocaleString('fr-FR') + ' ' + (claimed.devise || 'Ar')
+            + ' envoyes au ' + claimed.numero, '/');
+      }
+    } catch(e){}
     return;
   }
 
@@ -476,6 +486,20 @@ async function autoValidate(operator, message, smsId) {
         'Compte credite' + (derivTxnId ? (' \u2014 ref ' + derivTxnId) : ''));
     } else {
       tg.notifierDepotKo(claimed, derivErr || 'credit non confirme');
+    }
+  } catch(e){}
+  // Le client suit son depot sans rester sur le site.
+  try {
+    if (claimed.clientId) {
+      const U = require('../models/ClientPush');
+      const push = require('../utils/push');
+      if (depotStatus === 'success') {
+        push.notifierClient(U, claimed.clientId, 'Depot credite',
+          'Votre compte ' + (claimed.provider || '') + ' a ete credite.', '/');
+      } else {
+        push.notifierClient(U, claimed.clientId, 'Depot en cours de traitement',
+          'Paiement bien recu. Le credit est en cours, nous revenons vers vous.', '/');
+      }
     }
   } catch(e){}
 }
