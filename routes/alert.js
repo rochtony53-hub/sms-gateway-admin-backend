@@ -10,13 +10,27 @@ router.get('/', auth, async (req, res) => {
     const { status } = req.query;
     const filter = status ? { status } : {};
     const alerts = await Alert.find(filter).sort({ status: 1, createdAt: -1 }).limit(200).populate('retraitId');
-    res.json(alerts);
+    // Une alerte reste 'pending' meme quand le SMS finit par arriver et que
+    // l'ordre passe en 'success' : elle restait affichee sans objet. On la
+    // conserve en base pour l'historique, mais on ne la propose plus a l'admin.
+    const utiles = alerts.filter(a => {
+      if (a.status !== 'pending') return true;
+      const r = a.retraitId;
+      return !(r && r.status === 'success');
+    });
+    res.json(utiles);
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
 // GET /api/alert/count — badge nav (pending)
 router.get('/count', auth, async (req, res) => {
-  try { res.json({ count: await Alert.countDocuments({ status: 'pending' }) }); }
+  try {
+    // Meme regle que la liste : une alerte dont l'ordre a fini par aboutir ne
+    // demande plus d'action, elle ne doit pas gonfler le compteur.
+    const enAttente = await Alert.find({ status: 'pending' }).populate('retraitId');
+    const n = enAttente.filter(a => !(a.retraitId && a.retraitId.status === 'success')).length;
+    res.json({ count: n });
+  }
   catch(e) { res.status(500).json({ error: e.message }); }
 });
 

@@ -60,7 +60,14 @@ router.get('/dashboard', auth, role('admin','superadmin'), async (req, res) => {
       // nouveaux champs permettent d'afficher le bon nombre sur chaque menu.
       retrait: {
         total: retraitTotal, success: retraitSuccess, pending: retraitPending,
-        pendingRetrait: retraitSeulPending, pendingDepot: depotPending
+        pendingRetrait: retraitSeulPending,
+      // Encaissements bookmaker dont le Mobile Money n'est jamais parti :
+      // l'argent est sorti de la caisse et attend un remboursement.
+      aRembourser: await Retrait.countDocuments({
+        type: 'retrait', status: 'failed', rembourseLe: null,
+        provider: { $in: ['Betwinner', '1XBET', '1WIN'] },
+        montant: { $gt: 0 }
+      }), pendingDepot: depotPending
       },
       devices: devices.map(d => ({
         ...d.toObject(),

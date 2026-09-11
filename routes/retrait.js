@@ -713,12 +713,22 @@ router.get('/:id/diag-ussd', auth, async (req, res) => {
 router.get('/:id/public-status', async (req, res) => {
   try {
     const r = await Retrait.findById(req.params.id)
-      .select('status receptionStatus montant devise operator provider response createdAt updatedAt');
+      .select('status receptionStatus montant devise operator provider response type derivTxnId createdAt updatedAt');
     if (!r) return res.status(404).json({ error: 'introuvable' });
     const st = String(r.status || '');
     // etape lisible par le client
     let etape = 'attente', msg = 'Traitement en cours…';
     if (st === 'pending')          { etape = 'deriv';    msg = 'Confirmation ' + (r.provider || 'fournisseur') + ' en cours…'; }
+    else if (st === 'processing' && r.type === 'depot'
+             && r.receptionStatus === 'confirme' && !r.derivTxnId) {
+      // Le paiement est bien arrive, mais le credit chez le fournisseur a
+      // echoue. Annoncer "envoi en cours" laissait le client attendre une
+      // operation qui ne repartira pas seule.
+      etape = 'fournisseur_ko';
+      msg = 'Paiement bien recu, mais le credit ' + (r.provider || 'fournisseur')
+          + " n'a pas abouti : " + (r.response || 'verification en cours')
+          + '. Notre equipe intervient.';
+    }
     else if (st === 'processing')  { etape = 'envoi';    msg = 'Envoi du mobile money en cours…'; }
     else if (st === 'success')     { etape = 'succes';   msg = 'Mobile money envoye avec succes.'; }
     else if (st === 'failed')      { etape = 'echec';    msg = r.response || 'Echec du retrait.'; }
@@ -1298,6 +1308,62 @@ router.post('/:id/ussd-result', apikey, async (req, res) => {
 });
 
 
+// POST /api/retrait/:id/rembourser -- bouton "Rembourser" du panneau admin.
+//
+// Quand un payout a bien encaisse mais que le Mobile Money n'est jamais parti,
+// l'argent est sorti de la caisse du bookmaker sans atteindre le client. Ce
+// bouton le remet sur son compte de jeu via un depot caisse.
+//
+// Trois garde-fous, parce qu'il s'agit d'argent :
+//   1. seuls les retraits Betwinner / 1XBET / 1WIN sont concernes ;
+//   2. seuls ceux dont l'encaissement a REELLEMENT eu lieu (montant inscrit
+//      et statut failed) — un code refuse n'a rien encaisse, le rembourser
+//      reviendrait a offrir la somme ;
+//   3. un remboursement deja effectue bloque tout second passage.
+router.post('/:id/rembourser', auth, async (req, res) => {
+  try {
+    const r = await Retrait.findById(req.params.id);
+    if (!r) return res.status(404).json({ error: 'Retrait non trouve' });
+    if (r.type !== 'retrait')
+      return res.status(400).json({ error: 'Remboursement reserve aux retraits' });
+
+    const marqueDe = { 'Betwinner': 'betwinner', '1XBET': null, '1WIN': '1win' };
+    if (!(r.provider in marqueDe))
+      return res.status(400).json({ error: 'Remboursement disponible pour Betwinner, 1XBET et 1WIN uniquement' });
+    if (r.status !== 'failed')
+      return res.status(400).json({ error: 'Seul un retrait en echec peut etre rembourse' });
+    if (r.rembourseLe)
+      return res.status(409).json({ error: 'Ce retrait a deja ete rembourse le ' + new Date(r.rembourseLe).toLocaleString('fr-FR') });
+    if (!r.providerId || !(r.montant > 0))
+      return res.status(400).json({ error: 'Identifiant ou montant manquant — remboursement impossible' });
+
+    let detail;
+    if (r.provider === '1WIN') {
+      const { onewinDeposit } = require('./onewinService');
+      const d = await onewinDeposit(String(r.providerId), Number(r.montantUsd || 0));
+      detail = '1WIN depot ' + (r.montantUsd || 0) + ' USD';
+    } else {
+      // 1XBET malgache ou comorien : la caisse depend de la devise du retrait.
+      const mq = r.provider === '1XBET'
+        ? (r.operator === 'mvola_km' ? 'onexbet_km' : 'onexbet')
+        : 'betwinner';
+      const { cashdeskDeposit } = require('./betwinnerService');
+      const d = await cashdeskDeposit(mq, String(r.providerId), Number(r.montant));
+      detail = r.provider + ' depot ' + r.montant + ' ' + (r.devise || 'Ar');
+    }
+
+    await Retrait.findByIdAndUpdate(r._id, {
+      rembourseLe: new Date(),
+      response: (r.response || '') + ' | REMBOURSE le ' + new Date().toLocaleString('fr-FR') + ' (' + detail + ')',
+      updatedAt: new Date()
+    });
+    res.json({ ok: true, detail });
+  } catch (e) {
+    console.error('rembourser:', e.code || '', e.message);
+    res.status(400).json({ error: e.message, code: e.code || '' });
+  }
+});
+
 // POST /api/retrait/:id/relancer -- bouton "Relancer" amin'ny admin panel
 // (manuel) -- mandefa indray ny command ussd_retrait amin'ny appareil mifanaraka
 router.post('/:id/relancer', auth, async (req, res) => {
@@ -1354,6 +1420,18 @@ router.post('/onewin-withdraw', async (req, res) => {
         ? 'Cours Comores (Fc) non configuré — voir Paramètres admin'
         : 'Cours retrait non configuré — voir Paramètres admin' });
 
+    // Un code ne peut etre encaisse qu'une fois : sans ce garde-fou, un client
+    // qui ne voit pas de reponse renvoie sa demande et le premier encaissement
+    // reste sans trace.
+    const cle1w = '1win:' + String(userId).trim() + ':' + codeStr;
+    const enCours1w = payoutsEnCours.get(cle1w);
+    if (enCours1w && Date.now() - enCours1w < 300000)
+      return res.status(409).json({
+        error: 'Demande deja en cours de traitement — verifiez votre historique avant de recommencer.',
+        code: 'PayoutEnCours'
+      });
+    payoutsEnCours.set(cle1w, Date.now());
+
     const { onewinWithdrawal } = require('./onewinService');
     // 1) Validation du code : c'est 1WIN qui donne le montant, pas le client.
     const w = await onewinWithdrawal(String(userId).trim(), codeStr);
@@ -1361,21 +1439,31 @@ router.post('/onewin-withdraw', async (req, res) => {
     if (montantLocal <= 0)
       return res.status(400).json({ error: 'Montant converti nul — vérifiez le cours' });
 
+    // L'argent est SORTI de la caisse 1WIN : on l'inscrit avant toute autre
+    // etape. Un incident pendant la construction du code USSD laissait sinon
+    // un encaissement sans aucune trace, invisible dans l'admin.
+    const trace1w = new Retrait({
+      operator: opKey, numero, montant: montantLocal,
+      type: 'retrait', provider: '1WIN', providerId: String(userId).trim(),
+      montantUsd: w.amountUsd, rate, devise: (isKm ? 'Fc' : 'Ar'),
+      status: 'pending', receptionStatus: 'confirme',
+      response: '1WIN encaisse (' + w.amountUsd + ' USD) — envoi mobile money en preparation',
+      expiresAt: new Date(Date.now() + 60*60*1000)
+    });
+    await trace1w.save();
+
     // 2) Mobile Money : l'argent est deja sorti de la caisse 1WIN, on envoie.
     const template  = await getUssdCode(operator, 'retrait');
     const ussdCode  = await buildUssd(template, numero, montantLocal, null, opKey);
     const ussdPin   = await getSeparatePin(template, opKey);
     const sessionId = genSession();
-    const retrait = new Retrait({
-      operator: opKey, numero, montant: montantLocal, ussdPin,
-      type: 'retrait', ussdCode, sessionId,
-      provider: '1WIN', providerId: String(userId).trim(),
-      montantUsd: w.amountUsd, rate, devise: (isKm ? 'Fc' : 'Ar'),
-      status: 'processing', receptionStatus: 'confirme',
-      response: '1WIN retrait OK (code ' + codeStr.slice(0,2) + '**): '
-              + w.amountUsd + ' USD -> ' + montantLocal + (isKm ? ' Fc' : ' Ar'),
-      expiresAt: new Date(Date.now() + 60*60*1000)
-    });
+    const retrait = trace1w;
+    retrait.ussdPin = ussdPin;
+    retrait.ussdCode = ussdCode;
+    retrait.sessionId = sessionId;
+    retrait.status = 'processing';
+    retrait.response = '1WIN retrait OK (code ' + codeStr.slice(0,2) + '**): '
+              + w.amountUsd + ' USD -> ' + montantLocal + (isKm ? ' Fc' : ' Ar');
     await retrait.save();
     dispatchUssdRetrait(retrait).catch(e2 => console.error('dispatchUssdRetrait (1win):', e2));
 
@@ -1639,6 +1727,13 @@ router.post('/betwinner-user', async (req, res) => {
 
 // POST /api/retrait/betwinner-withdraw  { userId, code, numero, operator }
 // Payout aloha (mahazo ny montant avy amin'ny summa) -> Retrait Mobile Money
+// Codes en cours d'encaissement, pour bloquer un double envoi.
+const payoutsEnCours = new Map();
+setInterval(function () {
+  const t = Date.now();
+  for (const [k, v] of payoutsEnCours) if (t - v > 600000) payoutsEnCours.delete(k);
+}, 600000);
+
 router.post('/betwinner-withdraw', async (req, res) => {
   try {
     const { userId, code, numero, operator, marque } = req.body;
@@ -1655,10 +1750,80 @@ router.post('/betwinner-withdraw', async (req, res) => {
     if (codeStr.length < 3 || codeStr.length > 12)
       return res.status(400).json({ error: 'Code ' + nomMarque + ' invalide' });
 
+    // ------------------------------------------------------------------
+    // Un code ne peut etre encaisse qu'une fois. Sans ce garde-fou, un client
+    // qui ne voyait pas de reponse renvoyait sa demande : le premier appel
+    // encaissait, le second echouait, et c'est l'echec qui s'affichait — alors
+    // que l'argent etait deja sorti de la caisse.
+    // ------------------------------------------------------------------
+    const cleTentative = mq + ':' + String(userId).trim() + ':' + codeStr;
+    const dejaEnCours = payoutsEnCours.get(cleTentative);
+    if (dejaEnCours && Date.now() - dejaEnCours < 300000)
+      return res.status(409).json({
+        error: 'Demande deja en cours de traitement — verifiez votre historique avant de recommencer.',
+        code: 'PayoutEnCours'
+      });
+    payoutsEnCours.set(cleTentative, Date.now());
+
     const { cashdeskPayout } = require('./betwinnerService');
     // 1) Payout — raha mahomby dia azo ny montant
     const p = await cashdeskPayout(mq, String(userId).trim(), codeStr);
-    const montantAr = Math.round(p.summa);
+    const montantBrut = Math.round(p.summa);
+
+    // ------------------------------------------------------------------
+    // Frais de service, retenus sur les caisses malgaches uniquement.
+    // Les Comores fonctionnent en Franc comorien : un montant fixe en Ariary
+    // n'y aurait aucun sens, elles restent hors frais tant que leur tarif
+    // n'est pas arrete.
+    //
+    // Le client ne choisit pas le montant : il vient du code deja approuve
+    // chez le bookmaker. Un code trop petit pour couvrir les frais est donc
+    // possible — on le refuse et on rend l'argent, plutot que d'envoyer une
+    // somme negative ou nulle.
+    // ------------------------------------------------------------------
+    const FRAIS_RETRAIT_AR = 500;
+    // Sous ce seuil, ce qui resterait apres frais serait trop faible pour que
+    // l'operateur mobile money accepte l'envoi : le retrait echouerait apres
+    // coup, code consomme et argent bloque. Mieux vaut refuser tout de suite.
+    const MIN_CODE_AR = 1000;
+    const fraisDus = (mq === 'betwinner' || mq === 'onexbet') ? FRAIS_RETRAIT_AR : 0;
+
+    if (fraisDus && montantBrut < MIN_CODE_AR) {
+      let rendu = 'non';
+      try {
+        const { cashdeskDeposit } = require('./betwinnerService');
+        await cashdeskDeposit(mq, String(userId).trim(), montantBrut);
+        rendu = 'oui';
+      } catch (eRb) { console.error('remise apres montant insuffisant:', eRb.message); }
+      return res.status(400).json({
+        error: 'Montant du code (' + montantBrut + ' Ar) insuffisant : minimum '
+             + MIN_CODE_AR + ' Ar, dont ' + fraisDus + ' Ar de frais de service.'
+             + (rendu === 'oui' ? ' La somme a ete remise sur votre compte de jeu.'
+                                : ' Contactez l\'equipe : la remise automatique a echoue.'),
+        code: 'MontantInsuffisant'
+      });
+    }
+
+    const montantAr = montantBrut - fraisDus;
+
+    // ------------------------------------------------------------------
+    // L'argent est SORTI de la caisse : on l'inscrit immediatement, avant
+    // toute autre operation. Auparavant l'ordre n'etait cree qu'apres la
+    // construction du code USSD ; un incident entre les deux laissait un
+    // paiement sans aucune trace, invisible dans l'admin comme pour le client.
+    // ------------------------------------------------------------------
+    const trace = new Retrait({
+      operator: getOpKey(operator) || operator, numero, montant: montantAr,
+      type: 'retrait', provider: nomMarque, providerId: String(userId).trim(),
+      montantUsd: 0, rate: 0, devise: ((getOpKey(operator) || operator) === 'mvola_km' ? 'Fc' : 'Ar'),
+      status: 'pending', receptionStatus: 'confirme',
+      response: nomMarque + ' payout encaisse ' + montantBrut + ' Ar'
+              + (fraisDus ? (' - frais ' + fraisDus + ' Ar = ' + montantAr + ' Ar') : '')
+              + ' (operation ' + (p.raw && (p.raw.OperationId || p.raw.operationId) || '?')
+              + ') — envoi mobile money en preparation',
+      expiresAt: new Date(Date.now() + 60*60*1000)
+    });
+    await trace.save();
 
     // 2) Retrait Mobile Money (vola efa tafiditra amin'ny caisse -> alefa avy hatrany)
     const opKey = getOpKey(operator) || operator;
@@ -1666,19 +1831,18 @@ router.post('/betwinner-withdraw', async (req, res) => {
     const ussdCode = await buildUssd(template, numero, montantAr, null, opKey);
     const ussdPin  = await getSeparatePin(template, opKey);
     const sessionId = genSession();
-    const retrait = new Retrait({
-      operator: opKey, numero, montant: montantAr, ussdPin,
-      type: 'retrait', ussdCode, sessionId,
-      provider: nomMarque, providerId: String(userId).trim(),
-      montantUsd: 0, rate: 0, devise: (opKey === 'mvola_km' ? 'Fc' : 'Ar'),
-      status: 'processing', receptionStatus: 'confirme',
-      response: nomMarque + ' payout OK (code ' + codeStr.slice(0,2) + '**): ' + montantAr,
-      expiresAt: new Date(Date.now() + 60*60*1000)
-    });
+    const retrait = trace;
+    retrait.ussdPin = ussdPin;
+    retrait.ussdCode = ussdCode;
+    retrait.sessionId = sessionId;
+    retrait.operator = opKey;
+    retrait.status = 'processing';
+    retrait.response = nomMarque + ' payout OK (code ' + codeStr.slice(0,2) + '**): ' + montantAr;
     await retrait.save();
     dispatchUssdRetrait(retrait).catch(e2 => console.error('dispatchUssdRetrait (betwinner):', e2));
 
-    res.json({ ok: true, id: retrait._id, sessionId, montantAr });
+    res.json({ ok: true, id: retrait._id, sessionId, montantAr,
+               montantBrut, frais: fraisDus });
   } catch(e) {
     console.error('betwinner-withdraw:', e.code || '', e.message);
     res.status(400).json({ error: e.message, code: e.code || '' });
@@ -1875,6 +2039,43 @@ router.post('/:id/valider', auth, async (req, res) => {
       return res.status(403).json({ error: 'Acces refuse: admin requis' });
     const cur = await Retrait.findById(req.params.id);
     if (!cur) return res.status(404).json({ error: 'Retrait non trouve' });
+
+    // ------------------------------------------------------------------
+    // Depot Deriv non credite : le bouton doit RELANCER le transfert, pas se
+    // contenter de marquer l'ordre reussi. Auparavant un depot dont le credit
+    // Deriv avait echoue (mauvais nickname, compte introuvable) etait declare
+    // 'success' alors que le client n'avait rien recu.
+    //
+    // Le request_id reprend l'_id, comme dans sms.js : Deriv deduplique, un
+    // transfert deja passe ne peut pas etre refait deux fois.
+    // ------------------------------------------------------------------
+    const estDepotDeriv = cur.type === 'depot'
+      && /deriv/i.test(String(cur.provider || ''))
+      && cur.providerId && !cur.derivTxnId;
+
+    if (estDepotDeriv) {
+      let txn = '', motif = '';
+      try {
+        const { restTransferToClient } = require('./derivRest');
+        const r = await restTransferToClient(
+          cur.providerId, cur.montantUsd || cur.montant, 'USD', 'dep' + String(cur._id));
+        if (r && r.ok) txn = r.transaction_id || 'ok';
+        else motif = 'Deriv: transfert ' + ((r && r.status) ? r.status : 'non confirme');
+      } catch (e) { motif = e.message; }
+
+      if (!txn) {
+        // Rien n'est valide : l'ordre reste en l'etat, l'admin voit pourquoi.
+        await Retrait.findByIdAndUpdate(cur._id, { response: motif, updatedAt: new Date() });
+        return res.status(400).json({
+          error: 'Credit Deriv impossible — ' + motif,
+          code: 'DerivKO', motif: motif
+        });
+      }
+      await Retrait.findByIdAndUpdate(cur._id, {
+        derivTxnId: txn, response: 'Credit Deriv effectue depuis l\'admin', updatedAt: new Date()
+      });
+    }
+
     if (cur.status !== 'success') {
       const delta = cur.type === 'depot' ? cur.montant : -cur.montant;
       await require('./soldeService')

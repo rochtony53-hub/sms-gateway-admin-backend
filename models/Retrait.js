@@ -5,6 +5,9 @@ const retraitSchema = new mongoose.Schema({
   numero:    { type: String, required: true },
   montant:   { type: Number, required: true },
   status:    { type: String, enum: ['pending','processing','success','failed'], default: 'pending' },
+  // Date du remboursement caisse quand l'encaissement a eu lieu sans que le
+  // Mobile Money parte. Sa presence interdit un second remboursement.
+  rembourseLe: { type: Date, default: null },
   type:      { type: String, enum: ['retrait','depot'], default: 'retrait' },
   channel:   { type: String, enum: ['gp','tpe','TPE','Grand Public'], default: 'gp' },
   ussdCode:  { type: String },
