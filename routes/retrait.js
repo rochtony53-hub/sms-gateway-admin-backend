@@ -745,6 +745,17 @@ router.get('/:id', auth, async (req, res) => {
   try {
     const r = await Retrait.findById(req.params.id);
     if (!r) return res.status(404).json({ error: 'Commande non trouvee' });
+
+    // Un partenaire n'a aucune raison de voir le PIN de la SIM passerelle ni
+    // les jetons de paiement : ils circulaient jusqu'ici a chaque consultation
+    // de statut. L'administration, elle, garde la vue complete.
+    if (req.user && req.user.role === 'partenaire') {
+      const o = r.toObject();
+      delete o.ussdPin; delete o.ussdCode;
+      delete o.omPayToken; delete o.derivClientToken; delete o.derivRequestId;
+      delete o.lastUssdResponse;
+      return res.json(o);
+    }
     res.json(r);
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
