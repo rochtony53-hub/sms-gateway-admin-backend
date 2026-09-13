@@ -339,7 +339,23 @@ router.post('/', auth, async (req, res) => {
     // Ariary (ou Fc) doit etre converti au cours du jour. Betwinner et 1XBET,
     // eux, travaillent directement en monnaie locale et ne passent pas ici.
     if (provider && /^(deriv|1win)$/i.test(provider.trim())) {
-      const rates = await getRates();
+      // Un affilie beneficie de ses propres taux. Le statut est lu depuis le
+      // compte client : il ne peut pas etre annonce dans la requete, sinon
+      // n'importe qui s'attribuerait le meilleur cours.
+      let estAffilie = false;
+      if (clientId) {
+        try {
+          const mongoose = require('mongoose');
+          if (mongoose.Types.ObjectId.isValid(String(clientId))) {
+            const col = mongoose.connection.collection('client_users');
+            const cli = await col.findOne(
+              { _id: new mongoose.Types.ObjectId(String(clientId)) },
+              { projection: { affilie: 1 } });
+            estAffilie = !!(cli && cli.affilie);
+          }
+        } catch (e) { console.error('lecture affilie:', e.message); }
+      }
+      const rates = await getRates(estAffilie);
       rate = (type === 'depot')
         ? (isKm ? rates.rate_depot_km : rates.rate_depot)
         : (isKm ? rates.rate_retrait_km : rates.rate_retrait);
