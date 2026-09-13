@@ -301,6 +301,23 @@ router.post('/', auth, async (req, res) => {
     const { operator, numero, montant, type='retrait', clientId='', provider='', providerId='', clientRef='' } = req.body;
     if (!operator||!numero||!montant)
       return res.status(400).json({ error: 'operator, numero, montant requis' });
+
+    // ------------------------------------------------------------------
+    // Maintenance : on refuse les ordres NEUFS, jamais ceux deja en cours.
+    // Un client qui a paye doit etre servi, meme si le service ferme juste
+    // apres — sinon son argent reste bloque sans recours.
+    // ------------------------------------------------------------------
+    const Settings = require('../models/Settings');
+    const cleMaint = (type === 'depot') ? 'maintenance_depot' : 'maintenance_retrait';
+    const mnt = await Settings.findOne({ key: cleMaint });
+    if (mnt && (mnt.value === true || mnt.value === 'true')) {
+      const msg = await Settings.findOne({ key: cleMaint + '_message' });
+      return res.status(503).json({
+        error: (msg && msg.value) || ((type === 'depot' ? 'Les depots' : 'Les retraits')
+             + ' sont momentanement suspendus pour maintenance. Reessayez dans quelques instants.'),
+        code: 'Maintenance'
+      });
+    }
     // VIRGULE: "1,50" -> 1.50 (saisie FR mahazatra)
     const montantSaisi = Number(String(montant).replace(/\s/g,'').replace(',','.'));
     if (!montantSaisi || montantSaisi <= 0)
