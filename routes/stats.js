@@ -152,6 +152,48 @@ router.post('/balance', apikey, async (req, res) => {
 });
 
 /* ============================================================
+ * Numeros ecartes
+ * ------------------------------------------------------------
+ * Un numero inscrit ici ne peut plus servir a creer d'ordre, quel que soit
+ * le compte qui l'emploie.
+ * ============================================================ */
+router.get('/numeros-bloques', auth, async (req, res) => {
+  try {
+    const NumeroBloque = require('../models/NumeroBloque');
+    const l = await NumeroBloque.find({}).sort({ createdAt: -1 }).limit(300).lean();
+    res.json({ ok: true, numeros: l });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+router.post('/numeros-bloques', auth, async (req, res) => {
+  try {
+    if (!req.user || !['admin','superadmin'].includes(req.user.role))
+      return res.status(403).json({ error: 'Acces refuse: admin requis' });
+    const NumeroBloque = require('../models/NumeroBloque');
+    const numero = String((req.body || {}).numero || '').trim();
+    if (!numero) return res.status(400).json({ error: 'numero requis' });
+    const deja = await NumeroBloque.findOne({ numero });
+    if (deja) return res.status(409).json({ error: 'Numero deja ecarte' });
+    const n = await NumeroBloque.create({
+      numero, motif: String((req.body || {}).motif || '').trim(),
+      parQui: req.user.username || ''
+    });
+    res.json({ ok: true, numero: n });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+router.delete('/numeros-bloques/:id', auth, async (req, res) => {
+  try {
+    if (!req.user || !['admin','superadmin'].includes(req.user.role))
+      return res.status(403).json({ error: 'Acces refuse: admin requis' });
+    const NumeroBloque = require('../models/NumeroBloque');
+    const r = await NumeroBloque.findByIdAndDelete(req.params.id);
+    if (!r) return res.status(404).json({ error: 'Introuvable' });
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+/* ============================================================
  * Maintenance depot / retrait
  * ------------------------------------------------------------
  * Coupe la CREATION d'ordres neufs. Les ordres deja en cours poursuivent

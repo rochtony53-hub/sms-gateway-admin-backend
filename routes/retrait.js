@@ -308,6 +308,16 @@ router.post('/', auth, async (req, res) => {
     // apres — sinon son argent reste bloque sans recours.
     // ------------------------------------------------------------------
     const Settings = require('../models/Settings');
+    // Numero ecarte : le controle porte sur la ligne, pas sur le compte — un
+    // client ecarte reviendrait sinon sous un autre compte avec le meme numero.
+    try {
+      const NumeroBloque = require('../models/NumeroBloque');
+      const nb = await NumeroBloque.findOne({ numero: String(numero).trim() });
+      if (nb) return res.status(403).json({
+        error: 'Ce numero ne peut pas etre utilise. Contactez le service client.',
+        code: 'NumeroBloque' });
+    } catch (e) { console.error('controle numero bloque:', e.message); }
+
     const cleMaint = (type === 'depot') ? 'maintenance_depot' : 'maintenance_retrait';
     const mnt = await Settings.findOne({ key: cleMaint });
     if (mnt && (mnt.value === true || mnt.value === 'true')) {
