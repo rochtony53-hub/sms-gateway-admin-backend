@@ -761,7 +761,11 @@ router.get('/:id/public-status', async (req, res) => {
     const st = String(r.status || '');
     // etape lisible par le client
     let etape = 'attente', msg = 'Traitement en cours…';
-    if (st === 'pending')          { etape = 'deriv';    msg = 'Confirmation ' + (r.provider || 'fournisseur') + ' en cours…'; }
+    // Sans fournisseur, l'ordre attend simplement le paiement : annoncer une
+    // "confirmation fournisseur" laissait croire a une etape qui n'existe pas.
+    if (st === 'pending' && !r.provider)
+                                   { etape = 'attente';  msg = 'En attente du paiement.'; }
+    else if (st === 'pending')     { etape = 'deriv';    msg = 'Confirmation ' + r.provider + ' en cours…'; }
     else if (st === 'processing' && r.type === 'depot'
              && r.receptionStatus === 'confirme' && !r.derivTxnId) {
       // Le paiement est bien arrive, mais le credit chez le fournisseur a
