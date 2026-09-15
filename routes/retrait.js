@@ -298,7 +298,7 @@ async function buildUssd(template, numero, montant, numeroGateway, opKey) {
 // POST /api/retrait — créer un retrait
 router.post('/', auth, async (req, res) => {
   try {
-    const { operator, numero, montant, type='retrait', clientId='', provider='', providerId='', clientRef='' } = req.body;
+    const { operator, numero, montant, type='retrait', clientId='', provider='', providerId='', clientRef='', retourUrl='' } = req.body;
     if (!operator||!numero||!montant)
       return res.status(400).json({ error: 'operator, numero, montant requis' });
 
@@ -506,7 +506,18 @@ router.post('/', auth, async (req, res) => {
       // pour un seul ordre.
       ussdCode: payUrl ? '' : ussdCode,
       channel, id: retrait._id, sessionId,
-      payUrl,                       // vide => la vitrine garde le flux TPE
+      // Le client d'un partenaire doit revenir CHEZ LUI apres paiement, pas
+      // sur notre vitrine. L'adresse vient de l'ordre : nous ne pouvons pas la
+      // deviner, mais c'est nous qui la posons sur l'URL.
+      payUrl: (function () {
+        if (!payUrl || !retourUrl) return payUrl;
+        try {
+          const dest = new URL(String(retourUrl));
+          if (dest.protocol !== 'https:') return payUrl;
+          return payUrl + (payUrl.includes('?') ? '&' : '?')
+               + 'back=' + encodeURIComponent(dest.toString());
+        } catch (e) { return payUrl; }
+      })(),                         // vide => la vitrine garde le flux TPE
       payMode: payUrl ? 'orange_api' : 'ussd'
     });
   } catch(e) { res.status(500).json({ error: e.message }); }
