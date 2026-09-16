@@ -117,6 +117,21 @@ router.post('/check-result', apikey, async (req, res) => {
     // Constat REEL : passe par le service unique, qui remet les mouvements a
     // zero. C'est la passerelle qui fait autorite sur le solde.
     const { soldeVerifie } = require('./soldeService');
+    // Une reponse USSD n'est un solde que si elle le dit. Un menu comme
+    // "Veuillez verifier... 1 ou 2 | ANNULER | ENVOYER" contient des chiffres
+    // sans en etre un : la caisse tombait alors a 1 Ar et bloquait tous les
+    // retraits. On exige le mot, et on refuse un ecroulement non explique.
+    const texteUssd = String(ussdResponse || '');
+    const parleDeSolde = /solde|balance|volanao|sisa|disponible/i.test(texteUssd);
+    const ressembleAUnMenu = /annuler|envoyer|1\s*ou\s*2|veuillez|choisir|entrez/i.test(texteUssd);
+
+    if (!parleDeSolde || ressembleAUnMenu) {
+      console.warn('[SOLDE USSD] reponse ignoree pour ' + opKey + ' : '
+                 + texteUssd.slice(0, 90));
+      return res.json({ ok: true, operator: opKey, ignore: true,
+                        raison: 'la reponse USSD n annonce pas de solde' });
+    }
+
     await soldeVerifie(opKey, amount, 'ussd', ussdResponse);
 
     res.json({ ok: true, operator: opKey, baseAmount: amount, baseTimestamp });
