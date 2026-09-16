@@ -295,6 +295,29 @@ async function buildUssd(template, numero, montant, numeroGateway, opKey) {
     .split('{pin}').join(pin);
 }
 
+// GET /api/retrait/soldes — caisses disponibles, par operateur
+//
+// Un partenaire qui cree un ordre sans savoir ce que contient la caisse
+// essuie un refus tardif, apres avoir deja engage son client. Cette lecture
+// lui permet de verifier avant, avec le meme jeton que pour creer l'ordre.
+router.get('/soldes', auth, async (req, res) => {
+  try {
+    const lignes = await Solde.find({}, { operator: 1, montant: 1, updatedAt: 1, _id: 0 }).lean();
+    const soldes = {};
+    for (const l of lignes) {
+      if (l.operator === 'test') continue;           // entree de debug interne
+      soldes[l.operator] = {
+        montant: Number(l.montant || 0),
+        devise: l.operator === 'mvola_km' ? 'Fc' : 'Ar',
+        majLe: l.updatedAt || null
+      };
+    }
+    return res.json({ ok: true, soldes });
+  } catch (e) {
+    return res.status(500).json({ error: e.message });
+  }
+});
+
 // POST /api/retrait — créer un retrait
 router.post('/', auth, async (req, res) => {
   try {
