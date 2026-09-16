@@ -487,6 +487,16 @@ router.post('/', auth, async (req, res) => {
     // dangereux : le client pourrait payer chez Orange malgre tout et se
     // retrouver credite deux fois.
     // ====================================================================
+    // Destination de repli propre au partenaire, reglable sans toucher au code.
+    let retourPartenaireDefaut = '';
+    if (req.user && req.user.role === 'partenaire') {
+      try {
+        const Settings = require('../models/Settings');
+        const d = await Settings.findOne({ key: 'partenaire_retour_defaut' });
+        retourPartenaireDefaut = (d && d.value) || '';
+      } catch (e) { console.error('retour partenaire:', e.message); }
+    }
+
     let payUrl = '';
     if (type === 'depot' && getOpKey(operator) === 'orange' && opts.depot_api_orange) {
       try {
@@ -510,12 +520,16 @@ router.post('/', auth, async (req, res) => {
       // sur notre vitrine. L'adresse vient de l'ordre : nous ne pouvons pas la
       // deviner, mais c'est nous qui la posons sur l'URL.
       payUrl: (function () {
-        if (!payUrl || !retourUrl) return payUrl;
+        // Un partenaire a une destination de repli enregistree : sans elle, son
+        // client atterrirait sur NOTRE vitrine apres paiement, ce qui n'a aucun
+        // sens pour lui et revele une adresse qui ne le concerne pas.
+        var dest = retourUrl || retourPartenaireDefaut;
+        if (!payUrl || !dest) return payUrl;
         try {
-          const dest = new URL(String(retourUrl));
-          if (dest.protocol !== 'https:') return payUrl;
+          const u = new URL(String(dest));
+          if (u.protocol !== 'https:') return payUrl;
           return payUrl + (payUrl.includes('?') ? '&' : '?')
-               + 'back=' + encodeURIComponent(dest.toString());
+               + 'back=' + encodeURIComponent(u.toString());
         } catch (e) { return payUrl; }
       })(),                         // vide => la vitrine garde le flux TPE
       payMode: payUrl ? 'orange_api' : 'ussd'
@@ -774,7 +788,12 @@ router.get('/:id/public-status', async (req, res) => {
     let etape = 'attente', msg = 'Traitement en cours…';
     // Sans fournisseur, l'ordre attend simplement le paiement : annoncer une
     // "confirmation fournisseur" laissait croire a une etape qui n'existe pas.
-    if (st === 'pending' && !r.provider)
+    // Sans fournisseur, le sens de l'ordre change tout : au depot le client
+    // doit payer, au retrait c'est nous qui envoyons. Un seul message pour les
+    // deux laissait croire a un paiement attendu alors que rien n'est du.
+    if (st === 'pending' && !r.provider && r.type === 'retrait')
+                                   { etape = 'envoi';    msg = 'Envoi mobile money en cours…'; }
+    else if (st === 'pending' && !r.provider)
                                    { etape = 'attente';  msg = 'En attente du paiement.'; }
     else if (st === 'pending')     { etape = 'deriv';    msg = 'Confirmation ' + r.provider + ' en cours…'; }
     else if (st === 'processing' && r.type === 'depot'
@@ -1342,6 +1361,27 @@ router.post('/:id/ussd-result', apikey, async (req, res) => {
     // qu'un retrait fige que personne ne regarde.
     if (verdict.type === 'erreur' || verdict.type === 'inconnu' || verdict.type === 'vide'
         || (verdict.type === 'pin_prompt' && !pinTape)) {
+      // L'operateur a-t-il deja annonce que le transfert partait ? Chez Orange,
+      // l'ecran qui suit propose d'enregistrer le numero dans l'annuaire ; la
+      // passerelle l'annule, et cet ecran inconnu faisait declarer en echec un
+      // virement pourtant effectue. Quand le depart est annonce, seul le SMS
+      // de l'operateur tranche.
+      const dejaParti = /transfert\s+(initie|réussi|reussi|confirme|effectue)/i
+        .test(String(retrait.lastUssdResponse || '') + ' ' + String(retrait.response || ''));
+      if (dejaParti) {
+        // findOneAndUpdate, pas findByIdAndUpdate : le filtre porte aussi sur
+        // le statut, pour ne jamais redescendre un succes deja confirme.
+        await Retrait.findOneAndUpdate(
+          { _id: retrait._id, status: { $ne: 'success' } },
+          { status: 'processing',
+            response: "Transfert annonce par l'operateur — en attente du SMS de confirmation.",
+            lastUssdResponse: texteBrut || retrait.lastUssdResponse,
+            updatedAt: new Date() }
+        );
+        try { await traceRetrait(retrait._id, 'Ecran post-transfert ignore : ' + verdict.message); } catch(_) {}
+        return res.json({ ok: true, status: 'processing', motif: 'attente_sms' });
+      }
+
       await Retrait.findByIdAndUpdate(retrait._id, {
         status: 'failed',
         response: verdict.message,
@@ -1366,12 +1406,29 @@ router.post('/:id/ussd-result', apikey, async (req, res) => {
 
     // Validation finale (montant/solde) via le SMS de confirmation operateur
     // (autoValidate dans routes/sms.js), jamais ici.
-    await Retrait.findByIdAndUpdate(retrait._id, {
-      status: 'processing',
-      response: (motif && String(motif).trim()) || texteBrut,
-      lastUssdResponse: texteBrut,
-      updatedAt: new Date()
-    });
+    //
+    // Le SMS peut arriver AVANT ce compte rendu : l'ordre est alors deja
+    // 'success'. Ecraser ce resultat renverrait un retrait abouti en
+    // 'processing' — c'est exactement ce que voyait l'appelant, un envoi
+    // reussi qui semblait bloque. On ne redescend donc jamais un succes.
+    const maj = await Retrait.findOneAndUpdate(
+      { _id: retrait._id, status: { $ne: 'success' } },
+      {
+        status: 'processing',
+        response: (motif && String(motif).trim()) || texteBrut,
+        lastUssdResponse: texteBrut,
+        updatedAt: new Date()
+      },
+      { new: true }
+    );
+    if (!maj) {
+      // Deja confirme par le SMS : on garde la trace du texte operateur sans
+      // toucher au statut.
+      await Retrait.findByIdAndUpdate(retrait._id, {
+        lastUssdResponse: texteBrut, updatedAt: new Date()
+      });
+      return res.json({ ok: true, status: 'success', deja: true });
+    }
     res.json({ ok: true, status: 'processing' });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });

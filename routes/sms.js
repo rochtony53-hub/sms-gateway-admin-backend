@@ -342,7 +342,11 @@ async function autoValidate(operator, message, smsId) {
     // RETRAIT : vola alefa amin'ny client. SMS niditra = voaray ny client -> success.
     const solde = await Solde.findOne({ operator: opKey });
     const balance = solde?.montant || 0;
-    if (balance < claimed.montant) {
+    // Le SMS qui annonce le nouveau solde fait foi : l'operateur constate ce
+    // qu'il a reellement fait. Le solde garde en base, lui, peut retarder d'un
+    // mouvement — et bloquait alors un retrait pourtant deja parti.
+    const soldeDansSms = lireSoldeAnnonce(message);
+    if (soldeDansSms == null && balance < claimed.montant) {
       await Retrait.findByIdAndUpdate(claimed._id, {
         status: 'processing', receptionStatus: 'verification', lastUssdResponse: message,
         locked: false, updatedAt: new Date()

@@ -7,7 +7,12 @@ const Sms = require('../models/Sms');
 router.post('/heartbeat', apikey, async (req, res) => {
   try {
     const { deviceId, sims, battery, smsReceived, smsSent, ussdCheckEnabled, networkType, signalLevel } = req.body;
-    const setFields = { sims, battery, online: true, lastSeen: new Date() };
+    // La lecture des SIM echoue parfois sur le telephone (radio occupee,
+    // permission momentanement refusee) et le battement arrive alors vide.
+    // L'ecrire tel quel effacait une liste correcte, et le retrait suivant ne
+    // trouvait plus aucune passerelle pour l'operateur.
+    const setFields = { battery, online: true, lastSeen: new Date() };
+    if (sims && String(sims).trim()) setFields.sims = sims;
     if (ussdCheckEnabled !== undefined) setFields.ussdCheckEnabled = ussdCheckEnabled;
     if (networkType !== undefined) setFields.networkType = networkType;
     if (signalLevel !== undefined) setFields.signalLevel = signalLevel;
