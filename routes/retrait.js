@@ -1361,6 +1361,27 @@ router.post('/:id/ussd-result', apikey, async (req, res) => {
     // qu'un retrait fige que personne ne regarde.
     if (verdict.type === 'erreur' || verdict.type === 'inconnu' || verdict.type === 'vide'
         || (verdict.type === 'pin_prompt' && !pinTape)) {
+      // L'operateur a-t-il deja annonce que le transfert partait ? Chez Orange,
+      // l'ecran qui suit propose d'enregistrer le numero dans l'annuaire ; la
+      // passerelle l'annule, et cet ecran inconnu faisait declarer en echec un
+      // virement pourtant effectue. Quand le depart est annonce, seul le SMS
+      // de l'operateur tranche.
+      const dejaParti = /transfert\s+(initie|réussi|reussi|confirme|effectue)/i
+        .test(String(retrait.lastUssdResponse || '') + ' ' + String(retrait.response || ''));
+      if (dejaParti) {
+        // findOneAndUpdate, pas findByIdAndUpdate : le filtre porte aussi sur
+        // le statut, pour ne jamais redescendre un succes deja confirme.
+        await Retrait.findOneAndUpdate(
+          { _id: retrait._id, status: { $ne: 'success' } },
+          { status: 'processing',
+            response: "Transfert annonce par l'operateur — en attente du SMS de confirmation.",
+            lastUssdResponse: texteBrut || retrait.lastUssdResponse,
+            updatedAt: new Date() }
+        );
+        try { await traceRetrait(retrait._id, 'Ecran post-transfert ignore : ' + verdict.message); } catch(_) {}
+        return res.json({ ok: true, status: 'processing', motif: 'attente_sms' });
+      }
+
       await Retrait.findByIdAndUpdate(retrait._id, {
         status: 'failed',
         response: verdict.message,
@@ -1385,12 +1406,29 @@ router.post('/:id/ussd-result', apikey, async (req, res) => {
 
     // Validation finale (montant/solde) via le SMS de confirmation operateur
     // (autoValidate dans routes/sms.js), jamais ici.
-    await Retrait.findByIdAndUpdate(retrait._id, {
-      status: 'processing',
-      response: (motif && String(motif).trim()) || texteBrut,
-      lastUssdResponse: texteBrut,
-      updatedAt: new Date()
-    });
+    //
+    // Le SMS peut arriver AVANT ce compte rendu : l'ordre est alors deja
+    // 'success'. Ecraser ce resultat renverrait un retrait abouti en
+    // 'processing' — c'est exactement ce que voyait l'appelant, un envoi
+    // reussi qui semblait bloque. On ne redescend donc jamais un succes.
+    const maj = await Retrait.findOneAndUpdate(
+      { _id: retrait._id, status: { $ne: 'success' } },
+      {
+        status: 'processing',
+        response: (motif && String(motif).trim()) || texteBrut,
+        lastUssdResponse: texteBrut,
+        updatedAt: new Date()
+      },
+      { new: true }
+    );
+    if (!maj) {
+      // Deja confirme par le SMS : on garde la trace du texte operateur sans
+      // toucher au statut.
+      await Retrait.findByIdAndUpdate(retrait._id, {
+        lastUssdResponse: texteBrut, updatedAt: new Date()
+      });
+      return res.json({ ok: true, status: 'success', deja: true });
+    }
     res.json({ ok: true, status: 'processing' });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
