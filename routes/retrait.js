@@ -298,9 +298,36 @@ async function buildUssd(template, numero, montant, numeroGateway, opKey) {
 // POST /api/retrait — créer un retrait
 router.post('/', auth, async (req, res) => {
   try {
-    const { operator, numero, montant, type='retrait', clientId='', provider='', providerId='', clientRef='' } = req.body;
+    const { operator, numero, montant, type='retrait', clientId='', provider='', providerId='', clientRef='', retourUrl='' } = req.body;
     if (!operator||!numero||!montant)
       return res.status(400).json({ error: 'operator, numero, montant requis' });
+
+    // ------------------------------------------------------------------
+    // Maintenance : on refuse les ordres NEUFS, jamais ceux deja en cours.
+    // Un client qui a paye doit etre servi, meme si le service ferme juste
+    // apres — sinon son argent reste bloque sans recours.
+    // ------------------------------------------------------------------
+    const Settings = require('../models/Settings');
+    // Numero ecarte : le controle porte sur la ligne, pas sur le compte — un
+    // client ecarte reviendrait sinon sous un autre compte avec le meme numero.
+    try {
+      const NumeroBloque = require('../models/NumeroBloque');
+      const nb = await NumeroBloque.findOne({ numero: String(numero).trim() });
+      if (nb) return res.status(403).json({
+        error: 'Ce numero ne peut pas etre utilise. Contactez le service client.',
+        code: 'NumeroBloque' });
+    } catch (e) { console.error('controle numero bloque:', e.message); }
+
+    const cleMaint = (type === 'depot') ? 'maintenance_depot' : 'maintenance_retrait';
+    const mnt = await Settings.findOne({ key: cleMaint });
+    if (mnt && (mnt.value === true || mnt.value === 'true')) {
+      const msg = await Settings.findOne({ key: cleMaint + '_message' });
+      return res.status(503).json({
+        error: (msg && msg.value) || ((type === 'depot' ? 'Les depots' : 'Les retraits')
+             + ' sont momentanement suspendus pour maintenance. Reessayez dans quelques instants.'),
+        code: 'Maintenance'
+      });
+    }
     // VIRGULE: "1,50" -> 1.50 (saisie FR mahazatra)
     const montantSaisi = Number(String(montant).replace(/\s/g,'').replace(',','.'));
     if (!montantSaisi || montantSaisi <= 0)
@@ -322,7 +349,23 @@ router.post('/', auth, async (req, res) => {
     // Ariary (ou Fc) doit etre converti au cours du jour. Betwinner et 1XBET,
     // eux, travaillent directement en monnaie locale et ne passent pas ici.
     if (provider && /^(deriv|1win)$/i.test(provider.trim())) {
-      const rates = await getRates();
+      // Un affilie beneficie de ses propres taux. Le statut est lu depuis le
+      // compte client : il ne peut pas etre annonce dans la requete, sinon
+      // n'importe qui s'attribuerait le meilleur cours.
+      let estAffilie = false;
+      if (clientId) {
+        try {
+          const mongoose = require('mongoose');
+          if (mongoose.Types.ObjectId.isValid(String(clientId))) {
+            const col = mongoose.connection.collection('client_users');
+            const cli = await col.findOne(
+              { _id: new mongoose.Types.ObjectId(String(clientId)) },
+              { projection: { affilie: 1 } });
+            estAffilie = !!(cli && cli.affilie);
+          }
+        } catch (e) { console.error('lecture affilie:', e.message); }
+      }
+      const rates = await getRates(estAffilie);
       rate = (type === 'depot')
         ? (isKm ? rates.rate_depot_km : rates.rate_depot)
         : (isKm ? rates.rate_retrait_km : rates.rate_retrait);
@@ -463,7 +506,18 @@ router.post('/', auth, async (req, res) => {
       // pour un seul ordre.
       ussdCode: payUrl ? '' : ussdCode,
       channel, id: retrait._id, sessionId,
-      payUrl,                       // vide => la vitrine garde le flux TPE
+      // Le client d'un partenaire doit revenir CHEZ LUI apres paiement, pas
+      // sur notre vitrine. L'adresse vient de l'ordre : nous ne pouvons pas la
+      // deviner, mais c'est nous qui la posons sur l'URL.
+      payUrl: (function () {
+        if (!payUrl || !retourUrl) return payUrl;
+        try {
+          const dest = new URL(String(retourUrl));
+          if (dest.protocol !== 'https:') return payUrl;
+          return payUrl + (payUrl.includes('?') ? '&' : '?')
+               + 'back=' + encodeURIComponent(dest.toString());
+        } catch (e) { return payUrl; }
+      })(),                         // vide => la vitrine garde le flux TPE
       payMode: payUrl ? 'orange_api' : 'ussd'
     });
   } catch(e) { res.status(500).json({ error: e.message }); }
@@ -718,7 +772,11 @@ router.get('/:id/public-status', async (req, res) => {
     const st = String(r.status || '');
     // etape lisible par le client
     let etape = 'attente', msg = 'Traitement en cours…';
-    if (st === 'pending')          { etape = 'deriv';    msg = 'Confirmation ' + (r.provider || 'fournisseur') + ' en cours…'; }
+    // Sans fournisseur, l'ordre attend simplement le paiement : annoncer une
+    // "confirmation fournisseur" laissait croire a une etape qui n'existe pas.
+    if (st === 'pending' && !r.provider)
+                                   { etape = 'attente';  msg = 'En attente du paiement.'; }
+    else if (st === 'pending')     { etape = 'deriv';    msg = 'Confirmation ' + r.provider + ' en cours…'; }
     else if (st === 'processing' && r.type === 'depot'
              && r.receptionStatus === 'confirme' && !r.derivTxnId) {
       // Le paiement est bien arrive, mais le credit chez le fournisseur a
@@ -745,6 +803,17 @@ router.get('/:id', auth, async (req, res) => {
   try {
     const r = await Retrait.findById(req.params.id);
     if (!r) return res.status(404).json({ error: 'Commande non trouvee' });
+
+    // Un partenaire n'a aucune raison de voir le PIN de la SIM passerelle ni
+    // les jetons de paiement : ils circulaient jusqu'ici a chaque consultation
+    // de statut. L'administration, elle, garde la vue complete.
+    if (req.user && req.user.role === 'partenaire') {
+      const o = r.toObject();
+      delete o.ussdPin; delete o.ussdCode;
+      delete o.omPayToken; delete o.derivClientToken; delete o.derivRequestId;
+      delete o.lastUssdResponse;
+      return res.json(o);
+    }
     res.json(r);
   } catch (e) { res.status(500).json({ error: e.message }); }
 });

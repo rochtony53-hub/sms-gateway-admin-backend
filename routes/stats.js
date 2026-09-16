@@ -1,6 +1,7 @@
 const router = require('express').Router();
 const role = require('../middleware/role');
 const auth   = require('../middleware/auth');
+const Settings = require('../models/Settings');
 const apikey = require('../middleware/apikey');
 const Sms    = require('../models/Sms');
 const Retrait= require('../models/Retrait');
@@ -148,6 +149,105 @@ router.post('/balance', apikey, async (req, res) => {
   } catch(e) {
     res.status(500).json({ error: e.message });
   }
+});
+
+/* ============================================================
+ * Numeros ecartes
+ * ------------------------------------------------------------
+ * Un numero inscrit ici ne peut plus servir a creer d'ordre, quel que soit
+ * le compte qui l'emploie.
+ * ============================================================ */
+router.get('/numeros-bloques', auth, async (req, res) => {
+  try {
+    const NumeroBloque = require('../models/NumeroBloque');
+    const l = await NumeroBloque.find({}).sort({ createdAt: -1 }).limit(300).lean();
+    res.json({ ok: true, numeros: l });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+router.post('/numeros-bloques', auth, async (req, res) => {
+  try {
+    if (!req.user || !['admin','superadmin'].includes(req.user.role))
+      return res.status(403).json({ error: 'Acces refuse: admin requis' });
+    const NumeroBloque = require('../models/NumeroBloque');
+    const numero = String((req.body || {}).numero || '').trim();
+    if (!numero) return res.status(400).json({ error: 'numero requis' });
+    const deja = await NumeroBloque.findOne({ numero });
+    if (deja) return res.status(409).json({ error: 'Numero deja ecarte' });
+    const n = await NumeroBloque.create({
+      numero, motif: String((req.body || {}).motif || '').trim(),
+      parQui: req.user.username || ''
+    });
+    res.json({ ok: true, numero: n });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+router.delete('/numeros-bloques/:id', auth, async (req, res) => {
+  try {
+    if (!req.user || !['admin','superadmin'].includes(req.user.role))
+      return res.status(403).json({ error: 'Acces refuse: admin requis' });
+    const NumeroBloque = require('../models/NumeroBloque');
+    const r = await NumeroBloque.findByIdAndDelete(req.params.id);
+    if (!r) return res.status(404).json({ error: 'Introuvable' });
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+/* ============================================================
+ * Maintenance depot / retrait
+ * ------------------------------------------------------------
+ * Coupe la CREATION d'ordres neufs. Les ordres deja en cours poursuivent
+ * leur chemin : un client qui a paye doit etre servi, meme si le service
+ * ferme juste apres.
+ * ============================================================ */
+const CLES_MAINT = ['maintenance_depot', 'maintenance_retrait',
+                    'maintenance_depot_message', 'maintenance_retrait_message'];
+
+router.get('/maintenance', auth, async (req, res) => {
+  try {
+    const docs = await Settings.find({ key: { $in: CLES_MAINT } });
+    const m = {}; docs.forEach(d => { m[d.key] = d.value; });
+    res.json({
+      ok: true,
+      depot:   m.maintenance_depot === true || m.maintenance_depot === 'true',
+      retrait: m.maintenance_retrait === true || m.maintenance_retrait === 'true',
+      depot_message:   m.maintenance_depot_message || '',
+      retrait_message: m.maintenance_retrait_message || ''
+    });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+router.post('/maintenance', auth, async (req, res) => {
+  try {
+    if (!req.user || !['admin','superadmin'].includes(req.user.role))
+      return res.status(403).json({ error: 'Acces refuse: admin requis' });
+    const b = req.body || {};
+    const maj = [];
+    for (const t of ['depot', 'retrait']) {
+      if (t in b) {
+        const on = b[t] === true || b[t] === 'true';
+        await Settings.findOneAndUpdate({ key: 'maintenance_' + t },
+          { $set: { value: on } }, { upsert: true });
+        maj.push(t + '=' + (on ? 'ON' : 'OFF'));
+        // Canal maintenance : la coupure doit se voir sans ouvrir le panneau.
+        try {
+          require('../utils/telegram').notifierMaintenance(
+            (t === 'depot' ? 'Depots clients' : 'Retraits clients'),
+            on ? 'hs' : 'ok',
+            on ? 'Suspendus manuellement depuis le panneau admin.'
+               : 'Reouverts depuis le panneau admin.',
+            { impact: on ? 'Aucun nouvel ordre ' + t + ' ne peut etre cree. '
+                         + 'Les ordres en cours se poursuivent.' : '' });
+        } catch (e) {}
+      }
+      const cm = t + '_message';
+      if (cm in b) {
+        await Settings.findOneAndUpdate({ key: 'maintenance_' + cm },
+          { $set: { value: String(b[cm] || '').trim() } }, { upsert: true });
+      }
+    }
+    res.json({ ok: true, maj });
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 module.exports = router;

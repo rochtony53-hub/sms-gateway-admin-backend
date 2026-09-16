@@ -10,7 +10,9 @@ const mongoose = require('mongoose');
  */
 const schema = new mongoose.Schema(
   { fcmTokens: { type: [String], default: [] } },
-  { collection: 'users', strict: false }
+  // Les comptes clients vivent dans 'client_users' : pointer 'users' visait
+  // la collection des administrateurs, et aucune notification ne partait.
+  { collection: 'client_users', strict: false }
 );
 
 module.exports = mongoose.models.ClientPush || mongoose.model('ClientPush', schema);

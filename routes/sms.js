@@ -459,9 +459,15 @@ async function autoValidate(operator, message, smsId) {
       depotStatus = 'processing';
       derivErr = e.message;
     }
+  } else if (!claimed.provider) {
+    // Aucun fournisseur : l'ordre s'arrete a l'encaissement. C'est le cas des
+    // integrations partenaires, qui creditent leur client de leur cote — la
+    // passerelle n'a rien d'autre a faire, et l'annoncer en echec laissait
+    // croire a un probleme alors que l'argent etait bien arrive.
+    depotStatus = 'success';
   } else {
     depotStatus = 'processing';
-    derivErr = 'providerId (CR Deriv) manquant';
+    derivErr = 'Identifiant ' + claimed.provider + ' manquant sur l\'ordre';
   }
 
   // FIX: providerId (CR Deriv lasibatra) TSY soratana indray intsony -- mijanona
@@ -575,9 +581,15 @@ async function validerDepotOrangePay(retraitDoc) {
       console.error('[orange-pay] restTransferToClient', String(claimed._id), ':', e.message);
       depotStatus = 'processing'; derivErr = e.message;
     }
+  } else if (!claimed.provider) {
+    // Aucun fournisseur : l'ordre s'arrete a l'encaissement. C'est le cas des
+    // integrations partenaires, qui creditent leur client de leur cote — la
+    // passerelle n'a rien d'autre a faire, et l'annoncer en echec laissait
+    // croire a un probleme alors que l'argent etait bien arrive.
+    depotStatus = 'success';
   } else {
     depotStatus = 'processing';
-    derivErr = 'providerId (CR Deriv) manquant';
+    derivErr = 'Identifiant ' + claimed.provider + ' manquant sur l\'ordre';
   }
 
   await Retrait.findByIdAndUpdate(claimed._id, {
