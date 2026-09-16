@@ -140,9 +140,25 @@ router.post('/balance', apikey, async (req, res) => {
                 : operator.toLowerCase().includes('airtel') ? 'airtel' : null;
     if (!opKey) return res.status(400).json({ error: 'operator tsy fantatra' });
 
+    // Une lecture USSD mal decoupee renvoie parfois un chiffre isole : le
+    // solde tombait alors a 1 Ar et bloquait tous les retraits, alors que la
+    // caisse etait pleine. On refuse une chute brutale vers une valeur
+    // invraisemblable ; l'APK reessaiera au prochain relev\u00e9.
+    const nouveau = Number(montant);
+    if (!Number.isFinite(nouveau) || nouveau < 0)
+      return res.status(400).json({ error: 'montant invalide' });
+
+    const actuel = await Solde.findOne({ operator: opKey }).lean();
+    const avant = actuel ? Number(actuel.montant || 0) : 0;
+    if (avant >= 10000 && nouveau < 100) {
+      console.warn('[BALANCE] lecture suspecte ignoree : ' + opKey
+                 + ' ' + avant + ' -> ' + nouveau);
+      return res.json({ ok: true, operator: opKey, montant: avant, ignore: true });
+    }
+
     const s = await Solde.findOneAndUpdate(
       { operator: opKey },
-      { montant, updatedAt: new Date() },
+      { montant: nouveau, updatedAt: new Date() },
       { upsert: true, new: true }
     );
     res.json({ ok: true, operator: opKey, montant: s.montant });
