@@ -1465,7 +1465,7 @@ router.post('/:id/relancer', auth, async (req, res) => {
  * ============================================================ */
 router.post('/onewin-withdraw', async (req, res) => {
   try {
-    const { userId, code, numero, operator } = req.body;
+    const { userId, code, numero, operator, clientId = '' } = req.body;
     if (!userId || !code || !numero || !operator)
       return res.status(400).json({ error: 'champs requis: userId, code, numero, operator' });
     if (!/^[0-9]+$/.test(String(userId).trim()))
@@ -1514,6 +1514,7 @@ router.post('/onewin-withdraw', async (req, res) => {
     const trace1w = new Retrait({
       operator: opKey, numero, montant: montantLocal,
       type: 'retrait', provider: '1WIN', providerId: String(userId).trim(),
+      clientId: String(clientId || '').trim(),
       montantUsd: w.amountUsd, rate, devise: (isKm ? 'Fc' : 'Ar'),
       status: 'pending', receptionStatus: 'confirme',
       response: '1WIN encaisse (' + w.amountUsd + ' USD) — envoi mobile money en preparation',
@@ -1805,7 +1806,7 @@ setInterval(function () {
 
 router.post('/betwinner-withdraw', async (req, res) => {
   try {
-    const { userId, code, numero, operator, marque } = req.body;
+    const { userId, code, numero, operator, marque, clientId = '' } = req.body;
     const est1x = /1xbet|onexbet/i.test(String(marque || ''));
     const estKm = /mvola_km|comor/i.test(String(operator || ''));
     // Trois caisses : Betwinner (MG), 1XBET (MG), 1XBET KM (Comores, en Fc).
@@ -1884,6 +1885,7 @@ router.post('/betwinner-withdraw', async (req, res) => {
     const trace = new Retrait({
       operator: getOpKey(operator) || operator, numero, montant: montantAr,
       type: 'retrait', provider: nomMarque, providerId: String(userId).trim(),
+      clientId: String(clientId || '').trim(),
       montantUsd: 0, rate: 0, devise: ((getOpKey(operator) || operator) === 'mvola_km' ? 'Fc' : 'Ar'),
       status: 'pending', receptionStatus: 'confirme',
       response: nomMarque + ' payout encaisse ' + montantBrut + ' Ar'
@@ -1992,7 +1994,7 @@ router.post('/deriv-otp', async (req, res) => {
 });
 router.post('/deriv-withdraw', async (req, res) => {
   try {
-    const { tokenClient, otp, montant, numero, operator, providerId = '' } = req.body;
+    const { tokenClient, otp, montant, numero, operator, providerId = '', clientId = '' } = req.body;
     if (!tokenClient || !otp || !montant || !numero || !operator)
       return res.status(400).json({ error: 'champs requis manquants' });
     if (!/^[0-9]{6}$/.test(String(otp).trim()))
@@ -2036,6 +2038,7 @@ router.post('/deriv-withdraw', async (req, res) => {
       operator: opKey, numero, montant: montantAr,
       type: 'retrait', ussdCode, sessionId,
       provider: 'Deriv', providerId,
+      clientId: String(clientId || '').trim(),
       montantUsd, rate, devise: (_isKmWd ? 'Fc' : 'Ar'),
       derivRequestId: w.request_id,
       // Token client garde UNIQUEMENT tant que le retrait n'est pas regle
