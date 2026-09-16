@@ -774,7 +774,12 @@ router.get('/:id/public-status', async (req, res) => {
     let etape = 'attente', msg = 'Traitement en cours…';
     // Sans fournisseur, l'ordre attend simplement le paiement : annoncer une
     // "confirmation fournisseur" laissait croire a une etape qui n'existe pas.
-    if (st === 'pending' && !r.provider)
+    // Sans fournisseur, le sens de l'ordre change tout : au depot le client
+    // doit payer, au retrait c'est nous qui envoyons. Un seul message pour les
+    // deux laissait croire a un paiement attendu alors que rien n'est du.
+    if (st === 'pending' && !r.provider && r.type === 'retrait')
+                                   { etape = 'envoi';    msg = 'Envoi mobile money en cours…'; }
+    else if (st === 'pending' && !r.provider)
                                    { etape = 'attente';  msg = 'En attente du paiement.'; }
     else if (st === 'pending')     { etape = 'deriv';    msg = 'Confirmation ' + r.provider + ' en cours…'; }
     else if (st === 'processing' && r.type === 'depot'
