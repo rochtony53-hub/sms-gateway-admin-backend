@@ -487,6 +487,16 @@ router.post('/', auth, async (req, res) => {
     // dangereux : le client pourrait payer chez Orange malgre tout et se
     // retrouver credite deux fois.
     // ====================================================================
+    // Destination de repli propre au partenaire, reglable sans toucher au code.
+    let retourPartenaireDefaut = '';
+    if (req.user && req.user.role === 'partenaire') {
+      try {
+        const Settings = require('../models/Settings');
+        const d = await Settings.findOne({ key: 'partenaire_retour_defaut' });
+        retourPartenaireDefaut = (d && d.value) || '';
+      } catch (e) { console.error('retour partenaire:', e.message); }
+    }
+
     let payUrl = '';
     if (type === 'depot' && getOpKey(operator) === 'orange' && opts.depot_api_orange) {
       try {
@@ -510,12 +520,16 @@ router.post('/', auth, async (req, res) => {
       // sur notre vitrine. L'adresse vient de l'ordre : nous ne pouvons pas la
       // deviner, mais c'est nous qui la posons sur l'URL.
       payUrl: (function () {
-        if (!payUrl || !retourUrl) return payUrl;
+        // Un partenaire a une destination de repli enregistree : sans elle, son
+        // client atterrirait sur NOTRE vitrine apres paiement, ce qui n'a aucun
+        // sens pour lui et revele une adresse qui ne le concerne pas.
+        var dest = retourUrl || retourPartenaireDefaut;
+        if (!payUrl || !dest) return payUrl;
         try {
-          const dest = new URL(String(retourUrl));
-          if (dest.protocol !== 'https:') return payUrl;
+          const u = new URL(String(dest));
+          if (u.protocol !== 'https:') return payUrl;
           return payUrl + (payUrl.includes('?') ? '&' : '?')
-               + 'back=' + encodeURIComponent(dest.toString());
+               + 'back=' + encodeURIComponent(u.toString());
         } catch (e) { return payUrl; }
       })(),                         // vide => la vitrine garde le flux TPE
       payMode: payUrl ? 'orange_api' : 'ussd'
