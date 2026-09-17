@@ -17,6 +17,11 @@ const retraitSchema = new mongoose.Schema({
   ussdPin:   { type: String, default: '' },
   sessionId: { type: String, index: true },
   clientId:   { type: String, default: '', index: true },
+  // Ou ramener le client du partenaire une fois l'ordre termine. Conservee
+  // ici plutot que seulement posee sur l'URL : le partenaire qui reconstruit
+  // l'adresse a la main perdait le retour, et son client atterrissait chez
+  // nous.
+  retourUrl:  { type: String, default: '' },
   montantUsd: { type: Number, default: 0 },
   rate:       { type: Number, default: 0 },
   devise:     { type: String, default: 'Ar' },

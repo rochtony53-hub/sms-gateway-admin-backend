@@ -439,11 +439,23 @@ router.post('/', auth, async (req, res) => {
     }
 
     const sessionId = genSession();
+    // ====================================================================
+    // Destination de repli propre au partenaire, reglable sans toucher au code.
+    let retourPartenaireDefaut = '';
+    if (req.user && req.user.role === 'partenaire') {
+      try {
+        const Settings = require('../models/Settings');
+        const d = await Settings.findOne({ key: 'partenaire_retour_defaut' });
+        retourPartenaireDefaut = (d && d.value) || '';
+      } catch (e) { console.error('retour partenaire:', e.message); }
+    }
+
     const retrait = new Retrait({
       operator: opKey,
       numero, montant: montantNum,
       type, ussdCode, ussdPin, channel, sessionId,
       clientId, provider, providerId, clientRef,
+      retourUrl: (retourUrl || retourPartenaireDefaut || ''),
       montantUsd, rate, devise,
       status: 'pending',
       expiresAt: new Date(Date.now() + 60*60*1000) // FIX: 1h limite de validite
@@ -509,16 +521,6 @@ router.post('/', auth, async (req, res) => {
     // le depot reste possible. Basculer APRES la redirection serait
     // dangereux : le client pourrait payer chez Orange malgre tout et se
     // retrouver credite deux fois.
-    // ====================================================================
-    // Destination de repli propre au partenaire, reglable sans toucher au code.
-    let retourPartenaireDefaut = '';
-    if (req.user && req.user.role === 'partenaire') {
-      try {
-        const Settings = require('../models/Settings');
-        const d = await Settings.findOne({ key: 'partenaire_retour_defaut' });
-        retourPartenaireDefaut = (d && d.value) || '';
-      } catch (e) { console.error('retour partenaire:', e.message); }
-    }
 
     let payUrl = '';
     if (type === 'depot' && getOpKey(operator) === 'orange' && opts.depot_api_orange) {
@@ -895,7 +897,7 @@ router.delete('/:id', auth, async (req, res) => {
 router.get('/public/:id', async (req, res) => {
   try {
     const r = await Retrait.findById(req.params.id)
-      .select('type operator numero montant montantUsd rate devise ussdCode channel status createdAt sessionId');
+      .select('type operator numero montant montantUsd rate devise ussdCode channel status createdAt sessionId retourUrl');
     if (!r) return res.status(404).json({ error: 'Commande non trouvee' });
     let gatewayNumero = '';
     try { const cfg = await UssdConfig.findOne({ operator: getOpKey(r.operator) }); if (cfg) gatewayNumero = cfg.gatewayNumero || ''; } catch(_){}
@@ -1313,6 +1315,18 @@ function analyseUssdResponse(texte) {
   // envoi. Ajouter un operateur = ajouter son message a
   // DEPART_CONFIRME_PATTERNS, jamais retirer un motif d'erreur.
   // ------------------------------------------------------------------
+  // L'operateur peut refuser d'avance : PIN epuise, ligne suspendue, service
+  // indisponible. Relancer ne sert alors a rien — c'est chez lui que ca se
+  // regle. On le distingue de l'ecran vraiment inconnu, pour que l'alerte
+  // dise quoi faire au lieu de laisser chercher.
+  if (/essai\s*maximum|nombre\s+d.essai|code\s+bloqu|compte\s+bloqu|ligne\s+suspendu|service\s+(?:indisponible|momentanement)/i.test(t)) {
+    return {
+      type: 'operateur_bloque',
+      message: 'Operateur bloque — relancer ne servira a rien tant que la ligne '
+             + 'n est pas debloquee chez lui. Texte : ' + t.slice(0, 300)
+    };
+  }
+
   return {
     type: 'inconnu',
     message: 'Dernier ecran USSD non reconnu — transaction NON confirmee. '
@@ -1396,7 +1410,24 @@ router.post('/:id/ussd-result', apikey, async (req, res) => {
 
     // 'inconnu' est traite comme une anomalie : mieux vaut un retrait signale
     // qu'un retrait fige que personne ne regarde.
+    // Un blocage operateur est un echec comme un autre pour l'ordre — mais il
+    // merite une alerte qui dit quoi faire, sinon on relance en vain.
+    if (verdict.type === 'operateur_bloque') {
+      try {
+        require('../utils/telegram').envoyerTelegram(
+          '\u26D4 <b>OPERATEUR BLOQUE</b> \u2014 ' + String(retrait.operator || '').toUpperCase()
+          + '\n\nRelancer ne servira a rien tant que la ligne n est pas debloquee'
+          + ' chez l operateur.'
+          + '\n\nMontant : <b>' + Number(retrait.montant || 0).toLocaleString('fr-FR')
+          + ' ' + (retrait.devise || 'Ar') + '</b>'
+          + '\nNumero  : <code>' + (retrait.numero || '') + '</code>'
+          + '\n\n<i>' + String(texteBrut || '').slice(0, 200) + '</i>',
+          'retrait_err');
+      } catch (e) { /* l'alerte ne doit jamais faire echouer le traitement */ }
+    }
+
     if (verdict.type === 'erreur' || verdict.type === 'inconnu' || verdict.type === 'vide'
+        || verdict.type === 'operateur_bloque'
         || (verdict.type === 'pin_prompt' && !pinTape)) {
       // L'operateur a-t-il deja annonce que le transfert partait ? Chez Orange,
       // l'ecran qui suit propose d'enregistrer le numero dans l'annuaire ; la
