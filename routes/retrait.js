@@ -539,6 +539,20 @@ router.post('/', auth, async (req, res) => {
       // pour un seul ordre.
       ussdCode: payUrl ? '' : ussdCode,
       channel, id: retrait._id, sessionId,
+      // Adresse de suivi prete a l'emploi : elle porte deja la destination de
+      // retour du partenaire. Il la suit telle quelle plutot que de la
+      // reconstruire — une adresse assemblee a la main perd le retour.
+      suiviUrl: (function () {
+        var base = 'https://pay.matulmada.net/?order=' + retrait._id
+                 + (type === 'retrait' ? '&type=retrait' : '');
+        var dest = retourUrl || retourPartenaireDefaut;
+        if (!dest) return base;
+        try {
+          const u = new URL(String(dest));
+          if (u.protocol !== 'https:') return base;
+          return base + '&back=' + encodeURIComponent(u.toString());
+        } catch (e) { return base; }
+      })(),
       // Le client d'un partenaire doit revenir CHEZ LUI apres paiement, pas
       // sur notre vitrine. L'adresse vient de l'ordre : nous ne pouvons pas la
       // deviner, mais c'est nous qui la posons sur l'URL.
