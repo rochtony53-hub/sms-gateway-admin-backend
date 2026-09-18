@@ -1024,7 +1024,12 @@ async function dispatchUssdRetrait(retrait) {
       });
       // Canal dedie : un retrait bloque demande une action humaine, il ne doit
       // pas se noyer dans le fil des transactions reussies.
-      try { require('../utils/telegram').notifierRetraitErreur(retrait, motif); } catch(e){}
+      try {
+        require('../utils/telegram').notifierRetraitErreur(retrait,
+          motif + (retrait.lastUssdResponse
+            ? ('\n\nEcran USSD :\n\u00ab ' + String(retrait.lastUssdResponse).slice(0, 300) + ' \u00bb')
+            : ''));
+      } catch(e){}
       return;
     }
 
@@ -1047,7 +1052,12 @@ async function dispatchUssdRetrait(retrait) {
       });
       // Canal dedie : un retrait bloque demande une action humaine, il ne doit
       // pas se noyer dans le fil des transactions reussies.
-      try { require('../utils/telegram').notifierRetraitErreur(retrait, motif); } catch(e){}
+      try {
+        require('../utils/telegram').notifierRetraitErreur(retrait,
+          motif + (retrait.lastUssdResponse
+            ? ('\n\nEcran USSD :\n\u00ab ' + String(retrait.lastUssdResponse).slice(0, 300) + ' \u00bb')
+            : ''));
+      } catch(e){}
       return;
     }
 
@@ -1067,7 +1077,12 @@ async function dispatchUssdRetrait(retrait) {
       });
       // Canal dedie : un retrait bloque demande une action humaine, il ne doit
       // pas se noyer dans le fil des transactions reussies.
-      try { require('../utils/telegram').notifierRetraitErreur(retrait, motif); } catch(e){}
+      try {
+        require('../utils/telegram').notifierRetraitErreur(retrait,
+          motif + (retrait.lastUssdResponse
+            ? ('\n\nEcran USSD :\n\u00ab ' + String(retrait.lastUssdResponse).slice(0, 300) + ' \u00bb')
+            : ''));
+      } catch(e){}
       return;
     }
 
@@ -1114,7 +1129,12 @@ async function dispatchUssdRetrait(retrait) {
       });
       // Canal dedie : un retrait bloque demande une action humaine, il ne doit
       // pas se noyer dans le fil des transactions reussies.
-      try { require('../utils/telegram').notifierRetraitErreur(retrait, motif); } catch(e){}
+      try {
+        require('../utils/telegram').notifierRetraitErreur(retrait,
+          motif + (retrait.lastUssdResponse
+            ? ('\n\nEcran USSD :\n\u00ab ' + String(retrait.lastUssdResponse).slice(0, 300) + ' \u00bb')
+            : ''));
+      } catch(e){}
       return;
     }
 

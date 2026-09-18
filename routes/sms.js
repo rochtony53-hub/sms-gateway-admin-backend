@@ -380,8 +380,10 @@ async function autoValidate(operator, message, smsId) {
     // Pour un retrait, le SMS de l'operateur est a la fois la preuve que
     // l'argent est parti et la fin de l'operation : un seul message suffit.
     try {
+      // Le texte brut de l'operateur vaut mieux qu'un resume : il porte le
+      // montant, les frais et le solde, et tranche toute discussion.
       require('../utils/telegram').notifierTransaction('succes', claimed,
-        'SMS operateur recu' + (frais != null ? (' \u2014 frais ' + frais) : ''));
+        'Message operateur :\n\u00ab ' + String(message || '').slice(0, 300) + ' \u00bb');
     } catch(e){}
     // Le client est prevenu sur son telephone, meme site ferme.
     try {
@@ -490,10 +492,13 @@ async function autoValidate(operator, message, smsId) {
   // echouer alors meme que le paiement a bien ete recu.
   try {
     const tg = require('../utils/telegram');
-    tg.notifierTransaction('attente', claimed, 'Paiement recu \u2014 credit ' + claimed.provider + ' en cours');
+    tg.notifierTransaction('attente', claimed,
+      'Credit ' + claimed.provider + ' en cours.\n\nSMS operateur :\n\u00ab '
+      + String(message || '').slice(0, 300) + ' \u00bb');
     if (depotStatus === 'success') {
       tg.notifierTransaction('succes', claimed,
-        'Compte credite' + (derivTxnId ? (' \u2014 ref ' + derivTxnId) : ''));
+        'Compte credite' + (derivTxnId ? (' \u2014 ref ' + derivTxnId) : '')
+        + '\n\nSMS operateur :\n\u00ab ' + String(message || '').slice(0, 300) + ' \u00bb');
     } else {
       tg.notifierDepotKo(claimed, derivErr || 'credit non confirme');
     }
