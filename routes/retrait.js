@@ -1,6 +1,7 @@
 const router      = require('express').Router();
 const auth        = require('../middleware/auth');
 const apikey      = require('../middleware/apikey');
+const role        = require('../middleware/role');
 const Retrait     = require('../models/Retrait');
 const UssdConfig  = require('../models/UssdConfig');
 const Solde       = require('../models/Solde');
@@ -294,6 +295,69 @@ async function buildUssd(template, numero, montant, numeroGateway, opKey) {
     .split('{montant}').join(montant)
     .split('{pin}').join(pin);
 }
+
+// POST /api/retrait/transfert-caisse — vider une caisse vers un autre numero
+//
+// Quand la SIM d'une passerelle se remplit, il fallait jusqu'ici sortir le
+// telephone du service pour transferer a la main. Cet ordre emprunte le meme
+// chemin qu'un retrait ordinaire : la passerelle le prend dans sa file et
+// compose l'USSD sans etre interrompue.
+//
+// Reserve a l'administration : personne d'autre ne doit pouvoir vider une
+// caisse.
+router.post('/transfert-caisse', auth, role('admin', 'superadmin'), async (req, res) => {
+  try {
+    const { operator, numero, montant } = req.body || {};
+    if (!operator || !numero || !montant)
+      return res.status(400).json({ error: 'operator, numero et montant requis' });
+
+    const opKey = getOpKey(operator) || operator;
+    const mt = Number(montant);
+    if (!Number.isFinite(mt) || mt <= 0)
+      return res.status(400).json({ error: 'Montant invalide' });
+
+    const num = String(numero).replace(/\D/g, '');
+    if (num.length < 7)
+      return res.status(400).json({ error: 'Numero invalide' });
+
+    // La caisse doit contenir la somme : un ordre qui echoue laisse la
+    // passerelle occupee pour rien.
+    const solde = await Solde.findOne({ operator: opKey });
+    const dispo = solde ? Number(solde.montant || 0) : 0;
+    if (dispo < mt)
+      return res.status(400).json({ error: 'Caisse insuffisante : ' + dispo + ' disponible' });
+
+    const template = await getUssdCode(operator, 'retrait');
+    if (!template)
+      return res.status(400).json({ error: 'Aucun code USSD de retrait pour ' + opKey });
+    const ussdCode = await buildUssd(template, num, mt, null, opKey);
+    const ussdPin  = await getSeparatePin(template, opKey);
+    const sessionId = genSession();
+
+    const retrait = new Retrait({
+      operator: opKey, numero: num, montant: mt,
+      type: 'retrait', ussdCode, ussdPin, sessionId,
+      devise: (opKey === 'mvola_km' ? 'Fc' : 'Ar'),
+      status: 'pending', receptionStatus: 'confirme',
+      // Marque l'origine : un transfert interne ne se lit pas comme un
+      // retrait client dans les statistiques.
+      provider: 'CAISSE',
+      response: 'Transfert de caisse demande par ' + (req.user && req.user.username || 'admin'),
+      expiresAt: new Date(Date.now() + 60 * 60 * 1000)
+    });
+    await retrait.save();
+
+    try {
+      require('../utils/telegram').notifierTransaction('nouveau', retrait,
+        'Transfert de caisse \u2014 demande depuis l administration');
+    } catch (e) {}
+
+    return res.json({ ok: true, id: retrait._id, sessionId, ussdCode, montant: mt,
+                      soldeAvant: dispo });
+  } catch (e) {
+    return res.status(500).json({ error: e.message });
+  }
+});
 
 // GET /api/retrait/soldes — caisses disponibles, par operateur
 //
