@@ -19,8 +19,17 @@ function getOpKey(op) {
 
 // Maka numero malgache ao anatin'ny SMS (0XX XXXXXXX)
 function extractNumeroFromSms(message) {
-  const m = (message||'').replace(/[\s.\-]/g,'').match(/(0(?:32|33|34|37|38)\d{7})/);
-  return m ? m[1] : null;
+  const t = (message||'').replace(/[\s.\-]/g,'');
+  // 35 : tranche ouverte recemment par Airtel, absente de la liste d'origine.
+  const prefixes = '32|33|34|35|37|38';
+  // Forme complete : 0XX suivi de sept chiffres.
+  let m = t.match(new RegExp('(0(?:' + prefixes + ')\\d{7})'));
+  if (m) return m[1];
+  // Airtel ecrit parfois le numero sans son zero initial (350068204). On le
+  // retablit, sinon le SMS ne designe aucun ordre et le depot reste en
+  // attente alors que l'argent est arrive.
+  m = t.match(new RegExp('(?:^|[^0-9])((?:' + prefixes + ')\\d{7})(?:[^0-9]|$)'));
+  return m ? '0' + m[1] : null;
 }
 
 // Mizaha raha mitovy ny SMS amin'ny template ho an'ity operator ity.
