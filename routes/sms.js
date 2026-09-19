@@ -104,9 +104,20 @@ async function findMatchingRetrait(opKey, type, message, strict) {
 // FIX: 1h timeout - raha tafahoatra 1h ny pending/processing -> failed
 async function expireOldRetraits(opKey) {
   const oneHourAgo = new Date(Date.now() - 60*60*1000);
+  // Un ordre expire sans explication laissait l'administration devant un
+  // 'failed' muet : impossible de distinguer un client qui n'a jamais paye
+  // d'un incident technique. Le motif est donc inscrit.
+  await Retrait.updateMany(
+    { operator: opKey, status: 'pending', createdAt: { $lt: oneHourAgo },
+      $or: [ { response: '' }, { response: { $exists: false } } ] },
+    { $set: { status: 'failed',
+              response: "Expire : aucun paiement recu dans l'heure suivant la creation.",
+              updatedAt: new Date() } }
+  );
+  // Les ordres deja en cours de traitement gardent leur propre motif.
   await Retrait.updateMany(
     { operator: opKey, status: { $in: ['pending','processing'] }, createdAt: { $lt: oneHourAgo } },
-    { status: 'failed', updatedAt: new Date() }
+    { $set: { status: 'failed', updatedAt: new Date() } }
   );
 }
 

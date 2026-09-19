@@ -352,6 +352,13 @@ router.post('/transfert-caisse', auth, role('admin', 'superadmin'), async (req, 
         'Transfert de caisse \u2014 demande depuis l administration');
     } catch (e) {}
 
+    // L'ordre etait cree puis laisse en plan : rien ne le remettait a la
+    // passerelle, et il restait 'pending' indefiniment. On lance l'envoi comme
+    // pour un retrait client, sans attendre — la reponse part tout de suite et
+    // le suivi se fait sur le statut.
+    dispatchUssdRetrait(retrait).catch(e =>
+      console.error('transfert-caisse dispatchUssdRetrait:', e.message));
+
     return res.json({ ok: true, id: retrait._id, sessionId, ussdCode, montant: mt,
                       soldeAvant: dispo });
   } catch (e) {
