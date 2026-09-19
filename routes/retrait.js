@@ -485,6 +485,41 @@ router.post('/', auth, async (req, res) => {
     // — pourtant accepte par la validation — produisait un code tronque du type
     // "#144*1**5000#", que l'operateur rejette. Le depot ne fonctionnait alors
     // pas du tout, sans message d'erreur.
+    // ------------------------------------------------------------------
+    // Retrait TPE MVola : rendre le montant unique
+    //
+    // Le SMS de la caisse TPE ne porte aucun numero, seulement un montant.
+    // Deux retraits de meme montant en cours, et rien ne dit lequel le SMS
+    // confirme : l'un serait valide a la place de l'autre. On decale donc le
+    // montant de 1 Ar, puis 2, jusqu'a une valeur qu'aucun ordre en cours
+    // n'utilise. Le client paie quelques ariary de plus, et chaque SMS
+    // designe un seul ordre.
+    //
+    // Limite au retrait TPE MVola : ailleurs le SMS porte le numero du
+    // destinataire, et l'ambiguite n'existe pas.
+    const estTpeRetraitMvola = (type === 'retrait')
+      && (getOpKey(operator) === 'mvola')
+      && !!(require('./settings').getOptions() || {}).tpe_ret;
+
+    if (estTpeRetraitMvola) {
+      const enCours = await Retrait.find({
+        operator: getOpKey(operator), type: 'retrait', channel: 'TPE',
+        status: { $in: ['pending', 'processing'] }
+      }).select('montant');
+      const pris = new Set(enCours.map(r => Number(r.montant)));
+
+      let decale = 0;
+      while (decale <= 20 && pris.has(montantFinal + decale)) decale++;
+      if (decale > 20) {
+        // Vingt montants voisins occupes : accepter ici recreerait
+        // exactement l'ambiguite qu'on cherche a eviter.
+        return res.status(429).json({
+          error: 'Trop de retraits du meme montant en cours. Reessayez dans quelques minutes.'
+        });
+      }
+      montantFinal += decale;
+    }
+
     const ussdCode = await buildUssd(template, ussdNumero, montantFinal,
                                      numeroGateway, getOpKey(operator));
     // PIN separe : le gateway le tape a l'invite operateur (Orange). Vide si {pin}
