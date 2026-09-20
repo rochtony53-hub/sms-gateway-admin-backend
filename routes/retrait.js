@@ -970,7 +970,16 @@ router.get('/:id/public-status', async (req, res) => {
 
 router.get('/:id', auth, async (req, res) => {
   try {
-    const r = await Retrait.findById(req.params.id);
+    // Le partenaire interroge avec SA reference, pas avec notre identifiant :
+    // il ne connait souvent que celle-la. Une reference inconnue de Mongo
+    // levait une erreur de conversion, renvoyee en 500 — que son code lit
+    // comme "passerelle occupee", d'ou des ordres restes en attente chez lui
+    // alors qu'ils etaient termines chez nous.
+    const cle = String(req.params.id || '');
+    const estObjectId = /^[0-9a-f]{24}$/i.test(cle);
+    const r = estObjectId
+      ? await Retrait.findById(cle)
+      : await Retrait.findOne({ $or: [{ clientRef: cle }, { sessionId: cle }] });
     if (!r) return res.status(404).json({ error: 'Commande non trouvee' });
 
     // Un partenaire n'a aucune raison de voir le PIN de la SIM passerelle ni
