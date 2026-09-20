@@ -33,14 +33,19 @@ async function getUssdCode(operator, type) {
   const def    = DEFAULTS[key] || {};
   let template = null;
 
+  // Le choix TPE / Grand Public se lit par operateur : une SIM MVola peut
+  // servir en TPE pendant qu'une SIM Orange reste en Grand Public. Sans
+  // reglage propre, l'operateur suit le reglage general comme avant.
+  const tpeIci = require('./settings').tpeActif
+    ? require('./settings').tpeActif(key, type)
+    : (type === 'depot' ? !!opts.tpe_depot : !!opts.tpe_ret);
+
   if (type === 'depot') {
-    // tpe_depot ON → TPE, sinon GP
-    template = (opts.tpe_depot && templateUtilisable(config?.tpe_depot || def.tpe_depot, 'depot', key))
+    template = (tpeIci && templateUtilisable(config?.tpe_depot || def.tpe_depot, 'depot', key))
       ? (config?.tpe_depot || def.tpe_depot)
       : (config?.gp_depot  || def.gp_depot || '');
   } else {
-    // tpe_ret ON → TPE, sinon GP
-    template = (opts.tpe_ret && templateUtilisable(config?.tpe_retrait || def.tpe_retrait, 'retrait', key))
+    template = (tpeIci && templateUtilisable(config?.tpe_retrait || def.tpe_retrait, 'retrait', key))
       ? (config?.tpe_retrait || def.tpe_retrait)
       : (config?.gp_retrait  || def.gp_retrait || '');
   }
@@ -1003,7 +1008,11 @@ router.delete('/:id', auth, async (req, res) => {
 router.get('/public/:id', async (req, res) => {
   try {
     const r = await Retrait.findById(req.params.id)
-      .select('type operator numero montant montantUsd rate devise ussdCode channel status createdAt sessionId retourUrl');
+      // Champs du paiement Orange inclus : sans eux la page ne sait pas
+      // qu'un lien de paiement existe et retombe sur le parcours manuel, qui
+      // n'a ni code ni numero puisque l'API a pris le relais.
+      .select('type operator numero montant montantUsd rate devise ussdCode channel '
+            + 'status createdAt sessionId retourUrl omPayUrl omStatus omMontant provider');
     if (!r) return res.status(404).json({ error: 'Commande non trouvee' });
     let gatewayNumero = '';
     try { const cfg = await UssdConfig.findOne({ operator: getOpKey(r.operator) }); if (cfg) gatewayNumero = cfg.gatewayNumero || ''; } catch(_){}

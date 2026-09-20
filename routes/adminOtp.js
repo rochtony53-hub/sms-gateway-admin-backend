@@ -23,6 +23,24 @@ function empreinte(code) {
 router.post('/demander', async (req, res) => {
   try {
     const dest = process.env.ADMIN_OTP_EMAIL;
+    if (!dest) return res.status(500).json({ error: 'Entree par code non configuree' });
+
+    // Le code ne part qu'a qui connait deja le mot de passe. Sans ce controle,
+    // n'importe qui pourrait remplir la boite aux lettres de codes et tenter
+    // sa chance sur le second facteur.
+    const { username, password } = req.body || {};
+    if (!username || !password)
+      return res.status(400).json({ error: 'Identifiants requis' });
+
+    const bcrypt = require('bcryptjs');
+    const compte = await User.findOne({
+      username: String(username).trim(),
+      role: { $in: ['admin', 'superadmin'] }
+    });
+    // Meme reponse dans les deux cas : un message different dirait si le nom
+    // existe, et aiderait a deviner le reste.
+    const motOk = compte && await bcrypt.compare(String(password), compte.password || '');
+    if (!motOk) return res.status(401).json({ error: 'Identifiants incorrects' });
 
     // Une demande en cours suffit : sans ce garde-fou, un clic repete
     // remplirait la boite et permettrait d'essayer plusieurs codes de front.
@@ -37,6 +55,7 @@ router.post('/demander', async (req, res) => {
     await AdminOtp.create({
       hash: empreinte(code),
       expireLe: new Date(Date.now() + DUREE_MS),
+      username: compte.username,
       ip: req.ip || ''
     });
 
@@ -88,7 +107,9 @@ router.post('/verifier', async (req, res) => {
     otp.utiliseLe = new Date();
     await otp.save();
 
-    const admin = await User.findOne({ role: { $in: ['admin', 'superadmin'] } }).sort({ _id: 1 });
+    const admin = otp.username
+      ? await User.findOne({ username: otp.username, role: { $in: ['admin', 'superadmin'] } })
+      : await User.findOne({ role: { $in: ['admin', 'superadmin'] } }).sort({ _id: 1 });
 
     const token = jwt.sign(
       { id: admin._id, username: admin.username, role: admin.role },

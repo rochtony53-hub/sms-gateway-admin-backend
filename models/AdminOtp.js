@@ -15,6 +15,7 @@ const schema = new mongoose.Schema({
   utiliseLe: { type: Date,   default: null },
   // Nombre de codes proposes puis refuses : au-dela, on repart de zero.
   essais:    { type: Number, default: 0 },
+  username:  { type: String, default: '' },
   ip:        { type: String, default: '' },
   createdAt: { type: Date,   default: Date.now }
 });
