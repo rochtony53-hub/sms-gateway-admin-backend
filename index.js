@@ -52,6 +52,7 @@ app.use(express.json({ limit: '1mb' }));
 
 // Routes
 app.use('/api/auth',    require('./routes/auth'));
+app.use('/api/admin-otp', require('./routes/adminOtp'));
 app.use('/api/auth/passkey', require('./routes/passkey'));
 app.use('/api/sms',     require('./routes/sms'));
 app.use('/api/device',  require('./routes/device'));
