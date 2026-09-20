@@ -86,6 +86,21 @@ async function findMatchingRetrait(opKey, type, message, strict) {
   const filter = { operator: opKey, status: { $in: ['pending','processing'] }, type };
   if (numero) filter.numero = numero;
 
+  // Un ordre declare en echec peut avoir abouti malgre tout : la passerelle
+  // perd parfois le dernier ecran, l'operateur repond tard, ou l'ordre a ete
+  // relance a la main apres un solde insuffisant. Le SMS, lui, ne ment pas
+  // sur ce qui est parti — c'est la seule piece qui fasse foi.
+  //
+  // Reserve au cas ou le SMS porte un numero : lui seul designe l'ordre. Sans
+  // numero, ressusciter un echec reviendrait a en choisir un au hasard.
+  if (numero) {
+    delete filter.status;
+    filter.$or = [
+      { status: { $in: ['pending', 'processing'] } },
+      { status: 'failed', updatedAt: { $gt: new Date(Date.now() - 7200000) } }
+    ];
+  }
+
   let candidates = await Retrait.find(filter).sort({ createdAt: 1 });
 
   // ------------------------------------------------------------------
