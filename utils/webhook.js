@@ -49,6 +49,7 @@ function contenu(o) {
   return {
     id: String(o._id),
     clientRef: o.clientRef || '',
+    anciensClientRefs: Array.isArray(o.anciensClientRefs) ? o.anciensClientRefs : [],
     type: o.type,
     status: o.status,
     montant: o.montant,

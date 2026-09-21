@@ -561,6 +561,57 @@ router.post('/', auth, async (req, res) => {
       } catch (e) { console.error('retour partenaire:', e.message); }
     }
 
+    // ====================================================================
+    // Meme depot refait dans l'heure : on reprend l'ordre ouvert.
+    // Le client qui n'a pas encore paye et recommence le meme depot ne doit
+    // pas se retrouver avec deux ordres : un seul paiement, un seul ordre.
+    // Garde-fous : depot sans fournisseur, meme client, meme numero, meme
+    // operateur, ordre encore ouvert et libre, montant egal ou jusqu'a +10 %
+    // (les 20 Ar de decalage TPE sont admis). Orange API exclu : son lien de
+    // paiement est propre a chaque ordre. Sinon, creation normale.
+    if (type === 'depot' && !provider && !(opKey === 'orange' && opts.depot_api_orange)) {
+      try {
+        const ouvert = await Retrait.findOne({
+          type: 'depot', operator: opKey, numero,
+          clientId: clientId || '',
+          provider: { $in: [null, ''] },
+          status: { $in: ['pending', 'processing'] },
+          locked: { $ne: true },
+          expiresAt: { $gt: new Date() }
+        }).sort({ createdAt: -1 });
+        if (ouvert) {
+          const mAncien = Math.round(Number(ouvert.montant));
+          const mDemande = Math.round(Number(montant));
+          if (mDemande >= mAncien - 20 && mDemande <= Math.round(mAncien * 1.10)) {
+            const set = {}, maj = {};
+            if (clientRef && clientRef !== ouvert.clientRef) {
+              set.clientRef = clientRef;
+              if (ouvert.clientRef) maj.$addToSet = { anciensClientRefs: ouvert.clientRef };
+            }
+            if (retourUrl) set.retourUrl = retourUrl;
+            if (Object.keys(set).length) maj.$set = set;
+            if (Object.keys(maj).length) await Retrait.updateOne({ _id: ouvert._id }, maj);
+
+            let suivi = 'https://pay.matulmada.net/?order=' + ouvert._id;
+            const dest = retourUrl || ouvert.retourUrl || retourPartenaireDefaut;
+            try {
+              if (dest) {
+                const u = new URL(String(dest));
+                if (u.protocol === 'https:') suivi += '&back=' + encodeURIComponent(u.toString());
+              }
+            } catch (e) {}
+            console.log('[ordre repris]', String(ouvert._id), 'demande', mDemande, 'ordre', mAncien);
+            return res.json({
+              ok: true,
+              ussdCode: ouvert.ussdCode || '',
+              channel: ouvert.channel, id: ouvert._id, sessionId: ouvert.sessionId,
+              suiviUrl: suivi, payUrl: '', payMode: 'ussd', reprise: true
+            });
+          }
+        }
+      } catch (e) { console.error('reprise ordre:', e.message); }
+    }
+
     const retrait = new Retrait({
       operator: opKey,
       numero, montant: montantNum,
@@ -979,7 +1030,7 @@ router.get('/:id', auth, async (req, res) => {
     const estObjectId = /^[0-9a-f]{24}$/i.test(cle);
     const r = estObjectId
       ? await Retrait.findById(cle)
-      : await Retrait.findOne({ $or: [{ clientRef: cle }, { sessionId: cle }] });
+      : await Retrait.findOne({ $or: [{ clientRef: cle }, { sessionId: cle }, { anciensClientRefs: cle }] });
     if (!r) return res.status(404).json({ error: 'Commande non trouvee' });
 
     // Un partenaire n'a aucune raison de voir le PIN de la SIM passerelle ni

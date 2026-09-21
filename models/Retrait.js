@@ -22,6 +22,10 @@ const retraitSchema = new mongoose.Schema({
   // l'adresse a la main perdait le retour, et son client atterrissait chez
   // nous.
   retourUrl:  { type: String, default: '' },
+  // References partenaire d'ordres repris : un client qui refait le meme
+  // ordre dans l'heure retrouve l'ordre ouvert, sous sa nouvelle reference.
+  // Les anciennes restent reconnues.
+  anciensClientRefs: { type: [String], default: [], index: true },
   // Avis envoye au partenaire quand l'ordre se termine. Une seule livraison
   // par ordre : le partenaire credite son client a reception, un second avis
   // le ferait crediter deux fois. webhookEnvoyeLe fait foi.
