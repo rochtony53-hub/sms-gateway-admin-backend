@@ -682,10 +682,19 @@ router.post('/receive', apikey, async (req, res) => {
       { upsert: true }
     );
 
+    // Chaque SMS part sur Telegram avec son sort final. Sans effet sur la
+    // validation : la notification suit, elle ne bloque jamais.
+    const tgSms = () => Sms.findById(sms._id).then(x => {
+      if (x) require('../utils/telegram').notifierSms(x);
+    }).catch(() => {});
+
     if (dup) {
       console.warn('SMS dupliqué ignoré (déjà reçu <3min):', String(message).slice(0, 60));
+      tgSms();
     } else {
-      autoValidate(operator, message, sms._id).catch(e => console.error('autoValidate:', e));
+      autoValidate(operator, message, sms._id)
+        .catch(e => console.error('autoValidate:', e))
+        .finally(tgSms);
     }
     res.json({ id: sms._id, status: dup ? 'duplicate' : 'received' });
   } catch(e) {

@@ -160,7 +160,30 @@ function notifierInscription(u) {
   envoyer(l.join('\n'), 'inscription');
 }
 
+/**
+ * Chaque SMS recu part sur Telegram, quel qu'en soit le sort.
+ * Jusqu'ici seuls les succes y allaient : les SMS rejetes, doublons ou sans
+ * ordre correspondant — justement ceux qui demandent un regard humain —
+ * restaient invisibles, et l'argent recu la nuit passait inapercu.
+ */
+const ETAT_SMS = {
+  matched:   '\u2705 valide',
+  failed:    '\u26A0\uFE0F non rattache',
+  duplicate: '\u{1F501} doublon',
+  sent:      '\u2753 sans ordre'
+};
+function notifierSms(sms) {
+  try {
+    const etat = ETAT_SMS[sms.status] || String(sms.status || '?');
+    const texte = '\u{1F4E9} <b>SMS ' + esc(String(sms.operator || '').toUpperCase()) + '</b> — ' + etat + '\n'
+      + esc(String(sms.message || '').slice(0, 600)) + '\n'
+      + '<i>' + esc(sms.from || '') + ' · ' + esc(sms.deviceId || '') + '</i>';
+    envoyer(texte);
+  } catch (e) { console.warn('telegram sms:', e.message); }
+}
+
 module.exports = {
+  notifierSms,
   notifierTransaction, notifierWallet, notifierDepotKo,
   notifierRetraitErreur, notifierInscription, envoyerTelegram: envoyer
 };
