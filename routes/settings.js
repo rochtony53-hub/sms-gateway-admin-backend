@@ -65,6 +65,91 @@ router.post('/options', auth, async (req, res) => {
   }
 });
 
+// ====================================================================
+// Avis au partenaire (webhook)
+//
+// L'adresse et la cle de signature vivent ici, reglables sans toucher au
+// code. Reserve a l'administration : qui changerait l'adresse detournerait
+// les avis de paiement.
+// ====================================================================
+function estAdmin(req) {
+  return !!(req.user && ['admin', 'superadmin'].includes(req.user.role));
+}
+
+router.get('/webhook', auth, async (req, res) => {
+  if (!estAdmin(req)) return res.status(403).json({ error: 'Acces refuse' });
+  try {
+    const docs = await Settings.find({ key: { $in: [
+      'partenaire_webhook_url', 'partenaire_webhook_secret', 'partenaire_webhook_depuis'
+    ] } });
+    const c = {}; docs.forEach(d => { c[d.key] = d.value; });
+
+    const Retrait = require('../models/Retrait');
+    const jour = new Date(Date.now() - 86400000);
+    const base = { clientRef: { $nin: [null, ''] }, status: { $in: ['success', 'failed'] }, updatedAt: { $gte: jour } };
+    const [livres, attente, abandon] = await Promise.all([
+      Retrait.countDocuments({ ...base, webhookEnvoyeLe: { $ne: null } }),
+      Retrait.countDocuments({ ...base, webhookEnvoyeLe: null, webhookEssais: { $lt: 5 } }),
+      Retrait.countDocuments({ ...base, webhookEnvoyeLe: null, webhookEssais: { $gte: 5 } })
+    ]);
+
+    // La cle n'est jamais relue : on dit seulement qu'elle existe.
+    res.json({
+      url: c.partenaire_webhook_url || '',
+      secretDefini: !!c.partenaire_webhook_secret,
+      depuis: c.partenaire_webhook_depuis || null,
+      stats24h: { livres, attente, abandon }
+    });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+router.post('/webhook', auth, async (req, res) => {
+  if (!estAdmin(req)) return res.status(403).json({ error: 'Acces refuse' });
+  try {
+    const url = String((req.body || {}).url || '').trim();
+    if (url && !/^https:\/\//i.test(url))
+      return res.status(400).json({ error: 'Adresse https obligatoire' });
+
+    const ancien = await Settings.findOne({ key: 'partenaire_webhook_url' });
+    await Settings.findOneAndUpdate({ key: 'partenaire_webhook_url' }, { value: url }, { upsert: true });
+
+    // Nouvelle adresse : on ne rejoue pas l'historique, seuls les ordres
+    // termines a partir de maintenant seront annonces.
+    if (url && (!ancien || ancien.value !== url)) {
+      await Settings.findOneAndUpdate({ key: 'partenaire_webhook_depuis' },
+        { value: new Date().toISOString() }, { upsert: true });
+    }
+
+    // Cle de signature : creee une fois, ou regeneree sur demande. Elle
+    // n'est montree qu'a cet instant — a transmettre au partenaire.
+    let secretNouveau = null;
+    const existe = await Settings.findOne({ key: 'partenaire_webhook_secret' });
+    if (!existe || (req.body || {}).regenerer === true) {
+      secretNouveau = require('crypto').randomBytes(32).toString('hex');
+      await Settings.findOneAndUpdate({ key: 'partenaire_webhook_secret' },
+        { value: secretNouveau }, { upsert: true });
+    }
+    res.json({ ok: true, url, secret: secretNouveau });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Envoi d'essai : un faux ordre, pour que le partenaire verifie sa reception
+// sans attendre un vrai paiement.
+router.post('/webhook/test', auth, async (req, res) => {
+  if (!estAdmin(req)) return res.status(403).json({ error: 'Acces refuse' });
+  try {
+    const docs = await Settings.find({ key: { $in: ['partenaire_webhook_url', 'partenaire_webhook_secret'] } });
+    const c = {}; docs.forEach(d => { c[d.key] = d.value; });
+    if (!c.partenaire_webhook_url) return res.status(400).json({ error: 'Aucune adresse configuree' });
+    const w = require('../utils/webhook');
+    const faux = { _id: 'test-' + Date.now(), clientRef: 'test', type: 'depot', status: 'success',
+                   montant: 100, devise: 'Ar', operator: 'mvola', numero: '0340000000',
+                   sessionId: 'TEST', updatedAt: new Date() };
+    const r = await w.livrer(c.partenaire_webhook_url, c.partenaire_webhook_secret, faux);
+    res.json({ ok: r.ok, code: r.code, erreur: r.erreur || null });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 module.exports = router;
 module.exports.getOptions = () => options;
 module.exports.tpeActif = tpeActif;

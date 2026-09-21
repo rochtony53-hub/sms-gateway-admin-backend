@@ -22,6 +22,13 @@ const retraitSchema = new mongoose.Schema({
   // l'adresse a la main perdait le retour, et son client atterrissait chez
   // nous.
   retourUrl:  { type: String, default: '' },
+  // Avis envoye au partenaire quand l'ordre se termine. Une seule livraison
+  // par ordre : le partenaire credite son client a reception, un second avis
+  // le ferait crediter deux fois. webhookEnvoyeLe fait foi.
+  webhookEnvoyeLe:   { type: Date,   default: null },
+  webhookEssais:     { type: Number, default: 0 },
+  webhookProchainLe: { type: Date,   default: null },
+  webhookErreur:     { type: String, default: '' },
   montantUsd: { type: Number, default: 0 },
   rate:       { type: Number, default: 0 },
   devise:     { type: String, default: 'Ar' },

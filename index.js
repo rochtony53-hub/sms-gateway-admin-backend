@@ -121,6 +121,12 @@ mongoose.connect(process.env.MONGO_URI)
     app.listen(process.env.PORT || 3000, () =>
       console.log('Backend démarré port', process.env.PORT || 3000));
 
+    // Avis au partenaire quand un de ses ordres se termine. Tache a part :
+    // elle ne fait que lire les ordres termines. Sans adresse configuree
+    // dans l'administration, elle n'envoie rien.
+    try { require('./utils/webhook').demarrer(); }
+    catch (e) { console.error('webhook: demarrage impossible —', e.message); }
+
     // Auto-refuse les transactions pending depuis plus de 24h
     const Retrait = require('./models/Retrait');
     const DELAY_MS = 24 * 60 * 60 * 1000;
