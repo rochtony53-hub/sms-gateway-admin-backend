@@ -55,6 +55,31 @@ function montantDepotOk(type, montantSms, montantOrdre) {
     : (mSms === mOrd);
 }
 
+/** Reference de transaction de l'operateur ("Ref : 7554609477"), ou null. */
+function extraireRef(message) {
+  const m = String(message || '').match(/\bRef(?:erence)?\s*[:.]?\s*([A-Za-z0-9.]{6,})/i);
+  return m ? m[1].replace(/\.$/, '') : null;
+}
+
+/**
+ * Plusieurs ordres pour le meme numero : lequel ce SMS paie-t-il ?
+ * 1) montant qui colle ; 2) pas deja en traitement ; 3) ouverts avant expires.
+ * Si personne ne passe une etape, on garde la liste precedente.
+ */
+function choisirCandidats(candidates, montantSms, type) {
+  if (!Array.isArray(candidates) || candidates.length < 2) return candidates;
+  let liste = candidates;
+  if (montantSms != null) {
+    const bons = liste.filter(c => montantDepotOk(type, montantSms, c.montant));
+    if (bons.length) liste = bons;
+  }
+  const libres = liste.filter(c => c.locked !== true);
+  if (libres.length) liste = libres;
+  const ouverts = liste.filter(c => c.status === 'pending' || c.status === 'processing');
+  if (ouverts.length) liste = ouverts;
+  return liste;
+}
+
 // Maka ny MONTANT TRANSACTION (montant voalohany), TSY ny solde
 function parseMontant(message) {
   const msg = (message || '');
@@ -102,6 +127,7 @@ async function findMatchingRetrait(opKey, type, message, strict) {
   }
 
   let candidates = await Retrait.find(filter).sort({ createdAt: 1 });
+  candidates = choisirCandidats(candidates, parseMontant(message), type);
 
   // ------------------------------------------------------------------
   // REPLI "le plus ancien" — dangereux, donc interdit en mode strict.
@@ -269,6 +295,20 @@ async function autoValidate(operator, message, smsId) {
     if (sAnn != null) await require('./soldeService').soldeVerifie(opKey, sAnn, 'sms solde', message);
   } catch (e) { console.error('solde depuis SMS:', e.message); }
 
+  // Une reference operateur = un seul versement = un seul ordre valide.
+  const refOp = extraireRef(message);
+  if (refOp && smsId) {
+    const deja = await Sms.findOne({
+      _id: { $ne: smsId }, status: 'matched',
+      message: { $regex: refOp.replace(/[^A-Za-z0-9]/g, '\\$&') }
+    });
+    if (deja) {
+      console.warn('autoValidate: reference ' + refOp + ' deja validee - ignoree');
+      await Sms.findByIdAndUpdate(smsId, { status: 'duplicate', retraitId: deja.retraitId || null });
+      return;
+    }
+  }
+
   const result = await checkTemplate(opKey, message);
 
   if (result === null) {
@@ -342,7 +382,20 @@ async function autoValidate(operator, message, smsId) {
   //   retrait: egalite stricte (toy ny teo aloha)
   const mSms = Math.round(montantSms);
   if (!montantDepotOk(type, montantSms, retrait.montant)) {
-    // FIX: receptionStatus = rejete (montant diso / tsy ampy / mihoatra be)
+    // Depot : l'argent est arrive mais le montant ne colle pas a cet ordre.
+    // L'ordre n'est plus condamne ; l'administration est prevenue.
+    if (type === 'depot') {
+      if (smsId) await Sms.findByIdAndUpdate(smsId, { status: 'failed', retraitId: retrait._id });
+      try {
+        const ecart = Math.round(montantSms) - Math.round(Number(retrait.montant));
+        const motif = (ecart > 0 ? 'MONTANT SUPERIEUR' : 'MONTANT INSUFFISANT')
+          + ' - ordre ' + Math.round(Number(retrait.montant)) + ', recu ' + Math.round(montantSms)
+          + ' (' + (ecart > 0 ? '+' : '') + ecart + '). Ordre laisse en attente : validation manuelle.';
+        require('../utils/telegram').notifierDepotKo(retrait, motif);
+      } catch (e) { console.error('alerte montant:', e.message); }
+      return;
+    }
+    // Retrait : egalite stricte, comportement inchange.
     await Retrait.findByIdAndUpdate(retrait._id, {
       status: 'failed', receptionStatus: 'rejete', lastUssdResponse: message, updatedAt: new Date()
     });
@@ -886,3 +939,5 @@ module.exports.montantDepotOk = montantDepotOk;
 
 // Fonctions internes exposees pour les tests automatises.
 module.exports.__test = { lireSoldeAnnonce, lireFrais, versNombre };
+module.exports.choisirCandidats = choisirCandidats;
+module.exports.extraireRef = extraireRef;
