@@ -80,7 +80,8 @@ router.get('/webhook', auth, async (req, res) => {
   if (!estAdmin(req)) return res.status(403).json({ error: 'Acces refuse' });
   try {
     const docs = await Settings.find({ key: { $in: [
-      'partenaire_webhook_url', 'partenaire_webhook_secret', 'partenaire_webhook_depuis'
+      'partenaire_webhook_url', 'partenaire_webhook_url_km',
+      'partenaire_webhook_secret', 'partenaire_webhook_depuis'
     ] } });
     const c = {}; docs.forEach(d => { c[d.key] = d.value; });
 
@@ -96,6 +97,7 @@ router.get('/webhook', auth, async (req, res) => {
     // La cle n'est jamais relue : on dit seulement qu'elle existe.
     res.json({
       url: c.partenaire_webhook_url || '',
+      urlKm: c.partenaire_webhook_url_km || '',
       secretDefini: !!c.partenaire_webhook_secret,
       depuis: c.partenaire_webhook_depuis || null,
       stats24h: { livres, attente, abandon }
@@ -109,6 +111,18 @@ router.post('/webhook', auth, async (req, res) => {
     const url = String((req.body || {}).url || '').trim();
     if (url && !/^https:\/\//i.test(url))
       return res.status(400).json({ error: 'Adresse https obligatoire' });
+
+    // Adresse Comores : facultative. Absente du formulaire = inchangee.
+    const corpsReq = req.body || {};
+    if (corpsReq.urlKm !== undefined) {
+      const urlKm = String(corpsReq.urlKm || '').trim();
+      if (urlKm && !/^https:\/\//i.test(urlKm))
+        return res.status(400).json({ error: 'Adresse Comores : https obligatoire' });
+      await Settings.findOneAndUpdate({ key: 'partenaire_webhook_url_km' }, { value: urlKm }, { upsert: true });
+      if (urlKm && !(await Settings.findOne({ key: 'partenaire_webhook_depuis' })))
+        await Settings.findOneAndUpdate({ key: 'partenaire_webhook_depuis' },
+          { value: new Date().toISOString() }, { upsert: true });
+    }
 
     const ancien = await Settings.findOne({ key: 'partenaire_webhook_url' });
     await Settings.findOneAndUpdate({ key: 'partenaire_webhook_url' }, { value: url }, { upsert: true });
@@ -138,14 +152,18 @@ router.post('/webhook', auth, async (req, res) => {
 router.post('/webhook/test', auth, async (req, res) => {
   if (!estAdmin(req)) return res.status(403).json({ error: 'Acces refuse' });
   try {
-    const docs = await Settings.find({ key: { $in: ['partenaire_webhook_url', 'partenaire_webhook_secret'] } });
+    const docs = await Settings.find({ key: { $in: ['partenaire_webhook_url', 'partenaire_webhook_url_km', 'partenaire_webhook_secret'] } });
     const c = {}; docs.forEach(d => { c[d.key] = d.value; });
-    if (!c.partenaire_webhook_url) return res.status(400).json({ error: 'Aucune adresse configuree' });
+    // Essai vers le site demande : Comores si pays = km.
+    const km = String((req.body || {}).pays || '') === 'km';
+    const cible = km ? c.partenaire_webhook_url_km : c.partenaire_webhook_url;
+    if (!cible) return res.status(400).json({ error: km ? 'Aucune adresse Comores configuree' : 'Aucune adresse configuree' });
     const w = require('../utils/webhook');
     const faux = { _id: 'test-' + Date.now(), clientRef: 'test', type: 'depot', status: 'success',
                    montant: 100, devise: 'Ar', operator: 'mvola', numero: '0340000000',
                    sessionId: 'TEST', updatedAt: new Date() };
-    const r = await w.livrer(c.partenaire_webhook_url, c.partenaire_webhook_secret, faux);
+    if (km) { faux.operator = 'mvola_km'; faux.devise = 'Fc'; }
+    const r = await w.livrer(cible, c.partenaire_webhook_secret, faux);
     res.json({ ok: r.ok, code: r.code, erreur: r.erreur || null });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });

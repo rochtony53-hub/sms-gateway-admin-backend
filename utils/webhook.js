@@ -20,11 +20,25 @@ const TOUR_MS    = 30 * 1000;
 
 async function reglages() {
   const docs = await Settings.find({ key: { $in: [
-    'partenaire_webhook_url', 'partenaire_webhook_secret', 'partenaire_webhook_depuis'
+    'partenaire_webhook_url', 'partenaire_webhook_url_km',
+    'partenaire_webhook_secret', 'partenaire_webhook_depuis'
   ] } });
   const r = {};
   docs.forEach(d => { r[d.key] = d.value; });
   return r;
+}
+
+// Le partenaire a deux sites : Madagascar et Comores. Un ordre comorien
+// (operateur suffixe _km, ou devise Fc/KMF) part vers l'adresse Comores ;
+// faute d'adresse Comores, vers l'adresse principale pour ne rien perdre.
+function estComores(o) {
+  return /_km$/i.test(String(o.operator || '')) || /^(fc|kmf)$/i.test(String(o.devise || ''));
+}
+function adressePour(o, cfg) {
+  const mg = String(cfg.partenaire_webhook_url || '').trim();
+  const km = String(cfg.partenaire_webhook_url_km || '').trim();
+  const u = (estComores(o) && km) ? km : mg;
+  return /^https:\/\//i.test(u) ? u : '';
 }
 
 function signer(secret, corps) {
@@ -75,8 +89,9 @@ async function tour() {
   enCours = true;
   try {
     const cfg = await reglages();
-    const url = String(cfg.partenaire_webhook_url || '').trim();
-    if (!/^https:\/\//i.test(url)) return;          // pas configure, ou non chiffre
+    const aucune = !/^https:\/\//i.test(String(cfg.partenaire_webhook_url || '').trim())
+                && !/^https:\/\//i.test(String(cfg.partenaire_webhook_url_km || '').trim());
+    if (aucune) return;                               // rien de configure
 
     // Seuls les ordres termines APRES l'activation : ne pas rejouer
     // l'historique, deja traite par le partenaire a sa facon.
@@ -102,6 +117,8 @@ async function tour() {
       );
       if (!o) break;
 
+      const url = adressePour(o, cfg);
+      if (!url) continue;                             // pas d'adresse pour ce pays
       const res = await livrer(url, cfg.partenaire_webhook_secret, o);
       if (res.ok) {
         await Retrait.updateOne({ _id: o._id },
@@ -129,4 +146,4 @@ function demarrer() {
   console.log('[webhook] avis partenaire actifs (toutes les 30 s)');
 }
 
-module.exports = { demarrer, tour, contenu, signer, livrer };
+module.exports = { demarrer, tour, contenu, signer, livrer, estComores, adressePour };
