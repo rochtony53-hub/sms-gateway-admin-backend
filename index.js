@@ -51,6 +51,32 @@ app.set('trust proxy', 1);
 app.use(express.json({ limit: '1mb' }));
 
 // Routes
+// ====================================================================
+// Garde des routes d'administration.
+// SMS des clients, codes USSD, reglages, soldes : reserves a l'administration.
+// Un jeton partenaire y avait acces, l'authentification ne regardant pas le
+// role. Deux modes (variable GARDE_ADMIN) :
+//   observer (defaut) : on laisse passer mais on journalise tout acces d'un
+//                       role non administrateur, pour verifier sans rien casser ;
+//   bloquer          : ces acces recoivent 403.
+// Sans jeton ou jeton invalide : la route decide elle-meme, comme avant.
+// ====================================================================
+const GARDE_ROUTES = /^\/api\/(sms|ussd|settings|solde|template|numero)(\/|$)/;
+app.use((req, res, next) => {
+  if (!GARDE_ROUTES.test(req.path)) return next();
+  const h = req.headers.authorization || '';
+  if (!h.startsWith('Bearer ')) return next();
+  let u;
+  try { u = require('jsonwebtoken').verify(h.slice(7), process.env.JWT_SECRET); }
+  catch (e) { return next(); }
+  if (u && (u.role === 'admin' || u.role === 'superadmin')) return next();
+  const bloquer = String(process.env.GARDE_ADMIN || 'observer') === 'bloquer';
+  console.warn('[garde] ' + (bloquer ? 'BLOQUE' : 'observe') + ' role=' + (u && u.role)
+    + ' id=' + (u && u.id) + ' ' + req.method + ' ' + req.path);
+  if (bloquer) return res.status(403).json({ error: 'Acces refuse' });
+  next();
+});
+
 app.use('/api/auth',    require('./routes/auth'));
 app.use('/api/admin-otp', require('./routes/adminOtp'));
 app.use('/api/auth/passkey', require('./routes/passkey'));
