@@ -1603,6 +1603,38 @@ router.post('/:id/ussd-result', apikey, async (req, res) => {
     const verdict = analyseUssdResponse(response);
     const pinTape = pinSubmitted === true || pinSubmitted === 'true';
 
+    // Airtel : l'ecran "Enregistrer ce numero comme favori ?" n'apparait
+    // qu'apres un transfert reussi. Regle d'exploitation : c'est la preuve que
+    // l'argent est parti -> succes immediat, sans attendre le SMS. Le SMS
+    // Airtel arrive parfois des heures plus tard, et l'ordre expirait en echec
+    // alors que le client avait recu son argent. MVola et Orange ne changent
+    // pas : leur SMS reste la confirmation.
+    if (retrait.type === 'retrait' && getOpKey(retrait.operator) === 'airtel'
+        && /comme\s+favori|enregistrer\s+ce\s+num[eé]ro/i.test(String(texteBrut || response || ''))) {
+      const fait = await Retrait.findOneAndUpdate(
+        { _id: retrait._id, status: { $in: ['pending', 'processing'] } },
+        { status: 'success', receptionStatus: 'confirme',
+          response: 'Transfert confirme par Airtel (ecran favori).',
+          lastUssdResponse: texteBrut || retrait.lastUssdResponse,
+          locked: false, updatedAt: new Date() },
+        { new: true });
+      if (fait) {
+        // Mouvement estime ; le prochain SMS Airtel annoncant le solde le recale.
+        try { await require('./soldeService').soldeMouvement('airtel', -Number(fait.montant), 'retrait confirme par ecran Airtel'); }
+        catch (e) { console.error('solde airtel:', e.message); }
+        try { await traceRetrait(fait._id, 'Succes : ecran favori Airtel'); } catch (_) {}
+        try { require('../utils/telegram').notifierTransaction('succes', fait, 'Confirme par l ecran Airtel (favori).'); } catch (e) {}
+        try {
+          if (fait.clientId) {
+            const User = require('../models/ClientPush');
+            require('../utils/push').notifierClient(User, fait.clientId, 'Retrait envoye',
+              Number(fait.montant).toLocaleString('fr-FR') + ' ' + (fait.devise || 'Ar') + ' envoyes au ' + fait.numero, '/');
+          }
+        } catch (e) {}
+      }
+      return res.json({ ok: true, status: 'success', motif: 'airtel_favori' });
+    }
+
     // 'inconnu' est traite comme une anomalie : mieux vaut un retrait signale
     // qu'un retrait fige que personne ne regarde.
     // Un blocage operateur est un echec comme un autre pour l'ordre — mais il
