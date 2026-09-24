@@ -1278,6 +1278,39 @@ async function dispatchUssdRetrait(retrait) {
       ? KM_DEVICE_REGEX.test(dv.deviceId || '')
       : !KM_DEVICE_REGEX.test(dv.deviceId || ''));
 
+    // Repli : aucune SIM declaree ne correspond. L'APK annonce parfois
+    // "Unknown", ou rien du tout, quand Android ne lui donne pas le nom de
+    // l'operateur — le telephone Airtel devenait alors invisible et les
+    // retraits tombaient en "aucune passerelle", SIM pourtant en service.
+    // Les SMS recus tranchent : un telephone qui recoit de l'Airtel est sur
+    // une SIM Airtel. On ne retient que les appareils vivants, et seulement
+    // si leur courrier recent est sans ambiguite.
+    if (!devices.length) {
+      try {
+        const Sms = require('../models/Sms');
+        const flous = (await Device.find({
+          online: true, lastSeen: { $gte: limite },
+          $or: [ { sims: { $exists: false } }, { sims: '' }, { sims: /unknown|inconnu/i } ]
+        }).sort({ lastSeen: -1 }))
+          .filter(dv => (opKey === 'mvola_km')
+            ? KM_DEVICE_REGEX.test(dv.deviceId || '')
+            : !KM_DEVICE_REGEX.test(dv.deviceId || ''));
+
+        for (const dv of flous) {
+          const recents = await Sms.find({ deviceId: dv.deviceId })
+            .sort({ _id: -1 }).limit(30).select('operator').lean();
+          if (recents.length < 5) continue;
+          const ops = new Set(recents.map(r => getOpKey(r.operator)).filter(Boolean));
+          if (ops.size === 1 && ops.has(opKey)) {
+            console.warn('[passerelle] ' + dv.deviceId + ' retenu pour ' + opKey
+                       + ' : SIM non declaree, mais son courrier recent est exclusivement ' + opKey);
+            devices = [dv];
+            break;
+          }
+        }
+      } catch (e) { console.error('repli passerelle:', e.message); }
+    }
+
     if (!devices.length) {
       // On liste ce qui EXISTE pour que l'admin voie pourquoi rien ne correspond
       let vus = '';
