@@ -55,10 +55,27 @@ function montantDepotOk(type, montantSms, montantOrdre) {
     : (mSms === mOrd);
 }
 
-/** Reference de transaction de l'operateur ("Ref : 7554609477"), ou null. */
+/**
+ * Reference de transaction de l'operateur, ou null.
+ *
+ * Chaque operateur la nomme autrement : MVola et Orange ecrivent "Ref :",
+ * Airtel ecrit "Id:" apres un versement et "Trans ID:" sur un releve de
+ * solde. Seule la forme MVola etait reconnue : les SMS Airtel n'avaient donc
+ * aucune reference, et la protection contre une double validation ne les
+ * couvrait pas.
+ */
 function extraireRef(message) {
-  const m = String(message || '').match(/\bRef(?:erence)?\s*[:.]?\s*([A-Za-z0-9.]{6,})/i);
-  return m ? m[1].replace(/\.$/, '') : null;
+  const t = String(message || '');
+  const formes = [
+    /\bRef(?:erence)?\s*[:.]?\s*([A-Za-z0-9.]{6,})/i,   // MVola, Orange
+    /\bTrans(?:action)?\s*ID\s*[:.]?\s*([A-Za-z0-9.]{6,})/i, // Airtel, releve
+    /\bId\s*[:.]\s*([A-Za-z0-9.]{6,})/i                  // Airtel, versement
+  ];
+  for (const re of formes) {
+    const m = t.match(re);
+    if (m) return m[1].replace(/\.$/, '');
+  }
+  return null;
 }
 
 /**
