@@ -37,7 +37,11 @@ router.get('/dashboard', auth, role('admin','superadmin'), async (req, res) => {
     ]);
 
     // Détermine si la vérification USSD est active (au moins un device online avec le toggle ON)
-    const onlineDevices = devices.filter(d => (Date.now() - new Date(d.lastSeen).getTime()) < 120000);
+    // Meme seuil que routes/device.js : 12 minutes. Android met la passerelle
+    // en veille et son battement arrive par a-coups ; a 2 minutes, le tableau
+    // de bord declarait les telephones hors ligne et masquait les soldes alors
+    // que les SMS et les retraits passaient.
+    const onlineDevices = devices.filter(d => (Date.now() - new Date(d.lastSeen).getTime()) < 12 * 60 * 1000);
     const ussdCheckEnabled = onlineDevices.some(d => d.ussdCheckEnabled);
 
     // Build balances object — mihazo montant (verified) raha ON, montantOff raha OFF
@@ -72,7 +76,7 @@ router.get('/dashboard', auth, role('admin','superadmin'), async (req, res) => {
       },
       devices: devices.map(d => ({
         ...d.toObject(),
-        online: (devNow - new Date(d.lastSeen).getTime()) < 120000
+        online: (devNow - new Date(d.lastSeen).getTime()) < 12 * 60 * 1000
       })),
       byOperator,
       week: await (async () => {
