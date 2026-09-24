@@ -1297,8 +1297,14 @@ async function dispatchUssdRetrait(retrait) {
             : !KM_DEVICE_REGEX.test(dv.deviceId || ''));
 
         for (const dv of flous) {
-          const recents = await Sms.find({ deviceId: dv.deviceId })
-            .sort({ _id: -1 }).limit(30).select('operator').lean();
+          // Courrier RECENT seulement : un telephone qui tourne encore mais
+          // dont la SIM a ete retiree garde son ancien courrier en base, et
+          // serait choisi a tort. Un identifiant change aussi a chaque
+          // reinstallation de l'APK, laissant des appareils fantomes.
+          const recents = await Sms.find({
+            deviceId: dv.deviceId,
+            receivedAt: { $gte: new Date(Date.now() - 24 * 3600 * 1000) }
+          }).sort({ _id: -1 }).limit(30).select('operator').lean();
           if (recents.length < 5) continue;
           const ops = new Set(recents.map(r => getOpKey(r.operator)).filter(Boolean));
           if (ops.size === 1 && ops.has(opKey)) {
