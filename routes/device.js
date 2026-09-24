@@ -58,13 +58,18 @@ router.post('/heartbeat', apikey, async (req, res) => {
 // USSD qui ne seront jamais executees (retrait bloque en "processing").
 setInterval(async () => {
   try {
-    const limite = new Date(Date.now() - 3 * 60 * 1000);
+    // 12 minutes, pas 3 : Android met les applications en veille et le
+    // battement de la passerelle arrive toutes les 4 a 18 minutes. Un seuil
+    // court declarait les telephones hors ligne en permanence — les soldes
+    // s'affichaient "indisponible" et l'admin annoncait "aucun appareil",
+    // alors que les SMS et les retraits passaient normalement.
+    const limite = new Date(Date.now() - 12 * 60 * 1000);
     const r = await Device.updateMany(
       { online: true, lastSeen: { $lt: limite } },
       { $set: { online: false } }
     );
     const n = r.modifiedCount || r.nModified || 0;
-    if (n) console.log('Appareils repasses hors ligne (silence > 3 min): ' + n);
+    if (n) console.log('Appareils repasses hors ligne (silence > 12 min): ' + n);
   } catch (e) { console.error('sweeper appareils:', e.message); }
 }, 60 * 1000);
 
@@ -96,7 +101,7 @@ router.get('/stats', flexAuth, async (req, res) => {
       } catch(e){}
       return {
         ...obj,
-        online: (now - new Date(d.lastSeen).getTime()) < 120000
+        online: (now - new Date(d.lastSeen).getTime()) < 12 * 60 * 1000
       };
     }));
     if (deviceId && result.length === 1) return res.json(result[0]);
