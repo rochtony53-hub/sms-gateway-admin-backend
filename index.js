@@ -152,6 +152,9 @@ mongoose.connect(process.env.MONGO_URI)
     // dans l'administration, elle n'envoie rien.
     try { require('./utils/webhook').demarrer(); }
     catch (e) { console.error('webhook: demarrage impossible —', e.message); }
+    // Notification au client quand un de ses ordres echoue (une seule fois).
+    try { require('./utils/pushEchec').demarrer(); }
+    catch (e) { console.error('push-echec: demarrage impossible —', e.message); }
 
     // Auto-refuse les transactions pending depuis plus de 24h
     const Retrait = require('./models/Retrait');
