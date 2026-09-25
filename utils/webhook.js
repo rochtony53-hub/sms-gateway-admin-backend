@@ -83,6 +83,9 @@ async function livrer(url, secret, o) {
   } finally { clearTimeout(t); }
 }
 
+// Nom de domaine seul pour les journaux : ni chemin, ni secret.
+function hote(u) { try { return new URL(u).host; } catch (e) { return '?'; } }
+
 let enCours = false;
 
 async function tour() {
@@ -124,6 +127,8 @@ async function tour() {
       if (res.ok) {
         await Retrait.updateOne({ _id: o._id },
           { $set: { webhookEnvoyeLe: new Date(), webhookErreur: '' } });
+        console.log('[webhook] ' + res.code + ' ' + o.status + ' ' + o.type + ' ' + o.operator + ' '
+          + o.montant + ' ' + o.clientRef + ' -> ' + hote(url));
       } else {
         const essais = (o.webhookEssais || 0) + 1;
         const delai  = DELAIS_MIN[Math.min(essais, MAX_ESSAIS) - 1] * 60 * 1000;
@@ -132,6 +137,8 @@ async function tour() {
           webhookProchainLe: new Date(Date.now() + delai),
           webhookErreur: (res.erreur || ('HTTP ' + res.code)).slice(0, 200)
         } });
+        console.error('[webhook] echec ' + essais + '/' + MAX_ESSAIS + ' '
+          + (res.erreur || ('HTTP ' + res.code)) + ' ' + o.clientRef + ' -> ' + hote(url));
         if (essais >= MAX_ESSAIS)
           console.error('[webhook] abandon apres ' + essais + ' essais :', String(o._id), res.erreur || res.code);
       }
