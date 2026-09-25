@@ -1099,7 +1099,12 @@ router.post('/public/:id/processing', async (req, res) => {
 function operatorNameToKeyword(opKey) {
   if (opKey === 'orange') return 'Orange';
   if (opKey === 'mvola')  return 'MVola';
-  if (opKey === 'mvola_km') return 'MVola'; // SIM Telma Comores dia "Telma/MVola" ihany
+  // Comores : l'APK annonce la SIM sous le nom "Telma Comores". On cherchait
+  // "MVola", qui n'y figure pas : aucun telephone ne correspondait et les
+  // retraits comoriens tombaient tous en "aucune passerelle", appareil
+  // pourtant en ligne. "Comor" ne peut se confondre avec aucune SIM
+  // malgache, et le filtre sur le deviceId "KM" reste la seconde barriere.
+  if (opKey === 'mvola_km') return 'Comor';
   if (opKey === 'airtel') return 'Airtel';
   return null;
 }
