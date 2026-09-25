@@ -1679,6 +1679,41 @@ router.post('/:id/ussd-result', apikey, async (req, res) => {
       return res.json({ ok: true, status: 'success', motif: 'airtel_favori' });
     }
 
+    // Orange et MVola Comores : leur ecran final annonce la reussite en toutes
+    // lettres ("Depot effectue" / "Votre transaction a reussi"). Meme regle que
+    // l'ecran favori Airtel : c'est la preuve que l'argent est parti. Sans elle,
+    // un SMS absent ou non reconnu laissait l'ordre en 'processing', puis le
+    // balayeur le passait en 'failed' -> risque de renvoi et de double paiement.
+    // Ajout pur : Airtel, le chemin SMS et le solde restent inchanges.
+    {
+      const opBrut = String(retrait.operator || '').toLowerCase();
+      const ecran = String(texteBrut || response || '');
+      let preuve = null;
+      if (opBrut === 'mvola_km' && /transaction\s+a\s+r[e\u00e9]ussi/i.test(ecran)) preuve = 'mvola_km';
+      else if (getOpKey(retrait.operator) === 'orange' && /d[e\u00e9]p[o\u00f4]t\s+effectu[e\u00e9]/i.test(ecran)) preuve = 'orange';
+      if (preuve) {
+        const fait = await Retrait.findOneAndUpdate(
+          { _id: retrait._id, status: { $in: ['pending', 'processing'] } },
+          { status: 'success', receptionStatus: 'confirme',
+            response: 'Transfert confirme par l ecran ' + preuve + '.',
+            lastUssdResponse: texteBrut || retrait.lastUssdResponse,
+            locked: false, updatedAt: new Date() },
+          { new: true });
+        if (fait) {
+          try { await traceRetrait(fait._id, 'Succes : ecran de confirmation ' + preuve); } catch (_) {}
+          try { require('../utils/telegram').notifierTransaction('succes', fait, 'Confirme par l ecran ' + preuve + '.'); } catch (e) {}
+          try {
+            if (fait.clientId) {
+              const User = require('../models/ClientPush');
+              require('../utils/push').notifierClient(User, fait.clientId, 'Retrait envoye',
+                Number(fait.montant).toLocaleString('fr-FR') + ' ' + (fait.devise || 'Ar') + ' envoyes au ' + fait.numero, '/');
+            }
+          } catch (e) {}
+        }
+        return res.json({ ok: true, status: 'success', motif: 'ecran_' + preuve });
+      }
+    }
+
     // 'inconnu' est traite comme une anomalie : mieux vaut un retrait signale
     // qu'un retrait fige que personne ne regarde.
     // Un blocage operateur est un echec comme un autre pour l'ordre — mais il
