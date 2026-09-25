@@ -188,6 +188,19 @@ async function expireOldRetraits(opKey) {
   );
 }
 
+// Balayage periodique. expireOldRetraits ne tournait qu'a l'arrivee d'un SMS
+// du meme operateur : sans SMS (client qui ne paie pas, passerelle muette),
+// les ordres restaient 'pending'/'processing' indefiniment. Meme regle
+// qu'avant (1 h), meme fonction, appliquee toutes les 5 minutes.
+setInterval(async () => {
+  try {
+    const avant = new Date(Date.now() - 60*60*1000);
+    const ops = await Retrait.distinct('operator',
+      { status: { $in: ['pending','processing'] }, createdAt: { $lt: avant } });
+    for (const op of ops) { if (op) await expireOldRetraits(op); }
+  } catch (e) { console.error('[expiration] balayage:', e.message); }
+}, 5 * 60 * 1000);
+
 // FLOW FENO:
 // 1. SMS tsy mitovy template configured -> ignore (pas de retrait touche)
 // 2. SMS mitovy template fa tsy misy retrait mifanaraka -> "matched"
