@@ -504,7 +504,7 @@ router.post('/', auth, async (req, res) => {
     // destinataire, et l'ambiguite n'existe pas.
     const estTpeRetraitMvola = (type === 'retrait')
       && (getOpKey(operator) === 'mvola')
-      && !!(require('./settings').getOptions() || {}).tpe_ret;
+      && require('./settings').tpeActif('mvola', 'retrait');
 
     if (estTpeRetraitMvola) {
       const enCours = await Retrait.find({
@@ -535,7 +535,7 @@ router.post('/', auth, async (req, res) => {
   const opKeyForChannel = getOpKey(operator);
   const channel = opKeyForChannel === 'airtel'
     ? null
-    : ((type==='depot' ? opts.tpe_depot : opts.tpe_ret) ? 'TPE' : 'Grand Public');
+    : (require('./settings').tpeActif(opKeyForChannel, type === 'depot' ? 'depot' : 'retrait') ? 'TPE' : 'Grand Public');
 
     const opKey = getOpKey(operator) || operator;
     const montantNum = montantFinal;
@@ -882,7 +882,7 @@ router.get('/:id/diag-ussd', auth, async (req, res) => {
     const def    = DEFAULTS[opKey] || {};
     // Meme validation que dans getUssdCode : un modele TPE incomplet ne doit
     // jamais etre compose, surtout ici ou le PIN est arme.
-    const template = (opts.tpe_ret && templateUtilisable(config?.tpe_retrait || def.tpe_retrait, 'retrait', opKey))
+    const template = (require('./settings').tpeActif(opKey, 'retrait') && templateUtilisable(config?.tpe_retrait || def.tpe_retrait, 'retrait', opKey))
       ? (config?.tpe_retrait || def.tpe_retrait)
       : (config?.gp_retrait  || def.gp_retrait || '');
     if (!template) ko('3. Code USSD de retrait', 'Aucun code configure (Admin > Codes USSD)');
@@ -1165,7 +1165,7 @@ async function dispatchUssdRetrait(retrait) {
     }
     // Meme validation que dans getUssdCode : un modele TPE incomplet ne doit
     // jamais etre compose, surtout ici ou le PIN est arme.
-    const template = (opts.tpe_ret && templateUtilisable(config?.tpe_retrait || def.tpe_retrait, 'retrait', opKey))
+    const template = (require('./settings').tpeActif(opKey, 'retrait') && templateUtilisable(config?.tpe_retrait || def.tpe_retrait, 'retrait', opKey))
       ? (config?.tpe_retrait || def.tpe_retrait)
       : gpRetrait;
     if (!template) {
