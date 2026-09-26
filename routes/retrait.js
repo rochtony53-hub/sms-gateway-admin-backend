@@ -1588,7 +1588,21 @@ router.post('/:id/ussd-result', apikey, async (req, res) => {
     // 'response'. Les melanger rendait le vrai message de l'operateur illisible.
     const texteBrut = String(response == null ? '' : response).trim();
 
-    if (!success) {
+    // Preuve de l'operateur a l'ecran : elle prime sur le bilan de la
+    // passerelle. Une caisse Orange peut n'afficher qu'un ecran sur les deux
+    // attendus ("1 ecran sur 2") alors que le depot est bel et bien effectue.
+    // Les regles de succes plus bas (Airtel favori, Orange, MVola Comores)
+    // prennent alors le relais ; sans preuve, rien ne change.
+    const ecranReussi = (function () {
+      const t = texteBrut + ' ' + String(response || '');
+      const op = String(retrait.operator || '').toLowerCase();
+      if (op === 'mvola_km' && /transaction\s+a\s+r[e\u00e9]ussi/i.test(t)) return true;
+      if (getOpKey(retrait.operator) === 'orange' && /d[e\u00e9]p[o\u00f4]t\s+effectu[e\u00e9]/i.test(t)) return true;
+      if (retrait.type === 'retrait' && getOpKey(retrait.operator) === 'airtel'
+          && /comme\s+favori|enregistrer\s+ce\s+num[e\u00e9]ro/i.test(t)) return true;
+      return false;
+    })();
+    if (!success && !ecranReussi) {
       // ------------------------------------------------------------------
       // ISSUE INCONNUE ≠ ECHEC.
       // ------------------------------------------------------------------
